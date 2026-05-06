@@ -187,17 +187,33 @@ def parse_tws(path: Path) -> dict[str, dict]:
     """
     Парсит xlsx с TWS.BY (лист «ТНВЭД», столбцы: Код | Наименование | Тариф | Подробности).
     Возвращает {code: {description, duty_rate, full_path_tws}}.
+
+    Если формат файла поменяется (другие имена столбцов / другой лист) — падаем
+    с понятным сообщением, а не молча собираем кривую базу.
     """
     from openpyxl import load_workbook
 
     wb = load_workbook(str(path), read_only=True, data_only=True)
-    ws = wb["ТНВЭД"] if "ТНВЭД" in wb.sheetnames else wb.active
+    if "ТНВЭД" not in wb.sheetnames:
+        raise ValueError(
+            f"TWS.BY xlsx: ожидался лист «ТНВЭД», нашли: {wb.sheetnames}. "
+            "Скорее всего формат файла поменялся — поправь parse_tws."
+        )
+    ws = wb["ТНВЭД"]
 
-    rows = ws.iter_rows(values_only=True)
-    next(rows, None)  # пропускаем заголовок
+    rows_iter = ws.iter_rows(values_only=True)
+    header = next(rows_iter, None) or ()
+    header_norm = [str(c).strip().lower() if c else "" for c in header]
+    expected = ("код", "наименование", "тариф")
+    for word in expected:
+        if not any(word in h for h in header_norm):
+            raise ValueError(
+                f"TWS.BY xlsx: в заголовке листа «ТНВЭД» нет столбца «{word}». "
+                f"Реальный заголовок: {header}"
+            )
 
     out: dict[str, dict] = {}
-    for row in rows:
+    for row in rows_iter:
         if not row or len(row) < 3:
             continue
         code, name, tariff, *_ = row
@@ -218,6 +234,20 @@ def parse_tws(path: Path) -> dict[str, dict]:
         }
 
     wb.close()
+
+    # Sentinel-check: если получили совсем мало кодов или почти ни у кого нет
+    # тарифа — это сигнал что формат файла поменялся.
+    if len(out) < 1000:
+        raise ValueError(
+            f"TWS.BY xlsx: получили только {len(out)} кодов (ожидаем >10к). "
+            "Скорее всего формат изменился."
+        )
+    with_duty = sum(1 for v in out.values() if v["duty_rate"])
+    if with_duty < len(out) * 0.5:
+        raise ValueError(
+            f"TWS.BY xlsx: только {with_duty}/{len(out)} кодов с тарифом. "
+            "Колонка «Тариф» съехала?"
+        )
     return out
 
 

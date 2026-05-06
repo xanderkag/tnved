@@ -54,7 +54,7 @@
                     <label for="description">Описание товара</label>
                     <textarea id="description"
                         placeholder="Например: хлопковая ткань суровая, плотность 150 г/м², ширина 150 см"
-                        rows="4"></textarea>
+                        rows="4" maxlength="5000"></textarea>
                     <p class="hint">Опишите товар максимально полно. Система сама задаст уточняющие вопросы при необходимости.</p>
                 </div>
 
@@ -120,9 +120,8 @@
                 <div class="row row-spread">
                     <div class="model-picker">
                         <span class="model-picker-label">Модель</span>
-                        <select id="model-select" title="Модель Ollama">
-                            <option value="qwen2.5:14b" selected>qwen2.5:14b</option>
-                        </select>
+                        <span id="model-name" class="model-name">—</span>
+                        <select id="model-select" hidden></select>
                     </div>
                     <button id="start-btn" class="primary">
                         <span>Определить код</span>
@@ -224,7 +223,7 @@
                 </div>
                 <div id="chat-messages" class="chat-messages"></div>
                 <div class="chat-input-row">
-                    <textarea id="chat-input" rows="2"
+                    <textarea id="chat-input" rows="2" maxlength="5000"
                         placeholder="Опишите товар или ответьте на уточняющий вопрос…"></textarea>
                     <button id="chat-send-btn" class="primary">Отправить</button>
                 </div>

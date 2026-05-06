@@ -7,16 +7,17 @@ FastAPI-бэкенд: двухстадийный пайплайн классиф
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
@@ -30,6 +31,23 @@ DEFAULT_LLM = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "5"))
 BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
 CHAT_MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "6"))
+MAX_DESCRIPTION_LEN = int(os.environ.get("MAX_DESCRIPTION_LEN", "5000"))
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_HOURS", "24")) * 3600
+CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "600"))
+
+
+def _compute_static_version() -> str:
+    """Хеш содержимого app.css + app.js для cache-busting. Считается при импорте."""
+    h = hashlib.sha1()
+    for fname in ("app.css", "app.js", "index.html"):
+        try:
+            h.update((STATIC_DIR / fname).read_bytes())
+        except FileNotFoundError:
+            continue
+    return h.hexdigest()[:8]
+
+
+STATIC_VER = _compute_static_version()
 
 # ─── глобальные ресурсы ───────────────────────────────────────────────────────
 
@@ -43,15 +61,65 @@ class App:
 state = App()
 
 
+async def _cleanup_loop() -> None:
+    """Периодически чистит протухшие in-memory сущности (B2 в TECH_DEBT)."""
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            cutoff_iso = (datetime.utcnow() - timedelta(seconds=SESSION_TTL_SECONDS)).isoformat()
+
+            stale = [k for k, v in state.sessions.items() if (v.get("created_at") or "") < cutoff_iso]
+            for k in stale:
+                state.sessions.pop(k, None)
+
+            # batch — чистим только завершённые, бегущие не трогаем
+            stale = [
+                k for k, v in state.batch_jobs.items()
+                if v.get("status") in ("done", "failed")
+                and (v.get("finished_at") or v.get("started_at") or "") < cutoff_iso
+            ]
+            for k in stale:
+                state.batch_jobs.pop(k, None)
+
+            stale = [k for k, v in state.chats.items() if (v.get("created_at") or "") < cutoff_iso]
+            for k in stale:
+                state.chats.pop(k, None)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001 — фоновый цикл не должен умирать
+            print(f"[cleanup] error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Загружаем ресурсы ТН ВЭД...")
-    state.store = TNVEDStore()
-    print(f"Готово. Векторов: {state.store.index.ntotal:,}, групп: {len(state.store.groups)}")
-    yield
+    try:
+        state.store = TNVEDStore()
+        print(f"Готово. Векторов: {state.store.index.ntotal:,}, групп: {len(state.store.groups)}")
+    except Exception as e:  # noqa: BLE001 — переходим в degraded-режим вместо краха
+        print(f"[lifespan] FATAL: не смог загрузить TNVEDStore: {e}")
+        print("[lifespan] сервер поднят в degraded-режиме: classify-эндпоинты будут отдавать 503")
+        state.store = None
+
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(lifespan=lifespan, title="ТН ВЭД Ассистент")
+
+
+def _require_store() -> TNVEDStore:
+    """Гард для эндпоинтов, которым нужен загруженный store."""
+    if state.store is None:
+        raise HTTPException(503, "Сервис временно недоступен: справочник ТН ВЭД не загружен")
+    return state.store
 
 
 # ─── схемы ────────────────────────────────────────────────────────────────────
@@ -84,11 +152,17 @@ class SkipRequest(BaseModel):
 
 @app.post("/api/classify/start")
 async def classify_start(req: StartRequest):
+    store = _require_store()
     description = normalize_input(req.description, req.fields)
     if not description:
         raise HTTPException(400, "Пустое описание товара")
+    if len(description) > MAX_DESCRIPTION_LEN:
+        raise HTTPException(
+            400,
+            f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)",
+        )
 
-    triage_result = await triage(state.store, description, req.model)
+    triage_result = await triage(store, description, req.model)
 
     session_id = uuid.uuid4().hex[:12]
     state.sessions[session_id] = {
@@ -115,6 +189,7 @@ async def classify_start(req: StartRequest):
 
 @app.post("/api/classify/finalize")
 async def classify_finalize(req: FinalizeRequest):
+    store = _require_store()
     session = state.sessions.get(req.session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
@@ -126,7 +201,7 @@ async def classify_finalize(req: FinalizeRequest):
     group_code = session["triage"].get("group_code", "")
 
     result = await classify(
-        state.store,
+        store,
         description=description,
         group_code=group_code,
         model=req.model,
@@ -159,6 +234,19 @@ async def classify_get(session_id: str):
 @app.get("/api/models")
 async def models():
     return {"models": [DEFAULT_LLM], "default": DEFAULT_LLM}
+
+
+@app.get("/health")
+async def health():
+    """Лёгкий healthcheck. 200 если store загружен, 503 в degraded-режиме."""
+    if state.store is None:
+        raise HTTPException(503, "store not loaded")
+    return {
+        "status": "ok",
+        "vectors": int(state.store.index.ntotal),
+        "groups": len(state.store.groups),
+        "static_version": STATIC_VER,
+    }
 
 
 # ─── chat (свободный диалог) ──────────────────────────────────────────────────
@@ -230,11 +318,12 @@ def _chat_format_questions(triage_res: dict) -> str:
 
 
 async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
+    store = _require_store()
     chat = state.chats[chat_id]
     chat["messages"].append({"role": "user", "content": text})
     chat["description"] = (chat["description"] + "\n" + text).strip() if chat["description"] else text
 
-    triage_res = await triage(state.store, chat["description"], model)
+    triage_res = await triage(store, chat["description"], model)
 
     user_turns = sum(1 for m in chat["messages"] if m["role"] == "user")
     completeness = triage_res.get("completeness", "low")
@@ -248,7 +337,7 @@ async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
 
     if finalize:
         result = await classify(
-            state.store,
+            store,
             description=chat["description"],
             group_code=triage_res.get("group_code", ""),
             model=model,
@@ -312,6 +401,11 @@ async def chat_message(chat_id: str, req: ChatMessageRequest):
         raise HTTPException(404, "Чат не найден")
     if chat["phase"] == "finalized":
         raise HTTPException(409, "Чат уже завершён — начните новый")
+    if len(req.text) > MAX_DESCRIPTION_LEN:
+        raise HTTPException(
+            400,
+            f"Сообщение слишком длинное ({len(req.text)} > {MAX_DESCRIPTION_LEN} символов)",
+        )
     return await _chat_handle_user(chat_id, req.text, req.model)
 
 
@@ -357,9 +451,10 @@ def _detect_descriptions(rows: list[tuple]) -> list[str]:
 
 async def _classify_one_for_batch(description: str, model: str) -> dict:
     """В батче пропускаем уточнения: триаж → классификация на исходном описании."""
-    triage_result = await triage(state.store, description, model)
+    store = _require_store()
+    triage_result = await triage(store, description, model)
     group_code = triage_result.get("group_code", "")
-    result = await classify(state.store, description, group_code, model)
+    result = await classify(store, description, group_code, model)
     return {
         "group_code": group_code,
         "group_name": triage_result.get("group_name", ""),
@@ -399,6 +494,7 @@ async def classify_batch_start(
     file: UploadFile = File(...),
     model: str = Form(DEFAULT_LLM),
 ):
+    _require_store()
     fname = (file.filename or "").lower()
     if not fname.endswith(".xlsx"):
         raise HTTPException(400, "Ожидается .xlsx (Excel)")
@@ -514,4 +610,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    """Отдаёт index.html с подменой `?v=<STATIC_VER>` у JS/CSS — bust browser-кеша."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace('href="/static/app.css"', f'href="/static/app.css?v={STATIC_VER}"')
+    html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={STATIC_VER}"')
+    return Response(content=html, media_type="text/html; charset=utf-8")

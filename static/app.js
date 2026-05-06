@@ -83,6 +83,8 @@ async function loadModels() {
             if (m === data.default) opt.selected = true;
             sel.appendChild(opt);
         }
+        const label = $("model-name");
+        if (label) label.textContent = data.default || "—";
     } catch (e) {
         console.warn("Не удалось загрузить список моделей:", e);
     }
@@ -439,7 +441,7 @@ async function onChatSend() {
         finalized = data.phase === "finalized";
     } catch (e) {
         removeChatTyping();
-        appendChatMessage({ role: "assistant", content: `_Ошибка: ${e.message}_` });
+        appendChatMessage({ role: "error", content: `Не удалось обработать сообщение: ${e.message}` });
     } finally {
         chatState.busy = false;
         setBusy(false);
@@ -478,7 +480,11 @@ function appendChatMessage(m) {
     const box = $("chat-messages");
     const wrap = document.createElement("div");
     wrap.className = `chat-msg chat-msg-${m.role}`;
-    wrap.innerHTML = renderMarkdownLite(m.content || "");
+    if (m.role === "error") {
+        wrap.innerHTML = `<span class="chat-error-icon">⚠</span> ${escapeHtml(m.content || "")}`;
+    } else {
+        wrap.innerHTML = renderMarkdownLite(m.content || "");
+    }
     box.appendChild(wrap);
     box.scrollTop = box.scrollHeight;
 }

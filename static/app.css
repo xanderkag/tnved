@@ -197,6 +197,16 @@ textarea:focus, input:focus, select:focus {
     font-weight: 600;
 }
 
+.model-name {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.8125rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.625rem;
+    border-radius: 6px;
+}
+
 select {
     width: auto;
     cursor: pointer;
@@ -1309,6 +1319,20 @@ footer {
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
+}
+
+.chat-msg-error {
+    align-self: stretch;
+    background: rgba(239, 68, 68, 0.08);
+    color: var(--error);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    font-size: 0.875rem;
+    text-align: center;
+}
+
+.chat-error-icon {
+    font-size: 1rem;
+    margin-right: 0.25rem;
 }
 
 .chat-msg code {

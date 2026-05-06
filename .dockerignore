@@ -19,8 +19,14 @@ data/tnved.faiss
 data/tnved_meta.json
 .hf-cache/
 
+# демо-сервер и фикстуры — только локально для превью без LLM
+demo_server.py
+demo_input.xlsx
+static/demo_input.xlsx
+
 # legacy / dev
 .streamlit/
+.claude/
 *.log
 *.bak
 .DS_Store

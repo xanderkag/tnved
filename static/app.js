@@ -17,7 +17,17 @@ const state = {
 document.addEventListener("DOMContentLoaded", () => {
     loadModels();
 
-    // Mode toggle
+    // Top-level tabs (single / batch)
+    qsa(".top-tab").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const tab = btn.dataset.tab;
+            qsa(".top-tab").forEach(b => b.classList.toggle("active", b === btn));
+            $("tab-single").hidden = tab !== "single";
+            $("tab-batch").hidden = tab !== "batch";
+        });
+    });
+
+    // Mode toggle (внутри single)
     qsa(".mode-btn").forEach(btn => {
         btn.addEventListener("click", () => {
             qsa(".mode-btn").forEach(b => b.classList.toggle("active", b === btn));
@@ -40,6 +50,12 @@ document.addEventListener("DOMContentLoaded", () => {
             onStart();
         }
     });
+
+    // Batch
+    $("batch-pick-btn").addEventListener("click", () => $("batch-file").click());
+    $("batch-file").addEventListener("change", onBatchFileChosen);
+    $("batch-start-btn").addEventListener("click", onBatchStart);
+    $("batch-new-btn").addEventListener("click", onBatchReset);
 });
 
 
@@ -364,6 +380,104 @@ function renderResultStep(data) {
             ${checksHtml}
         </div>
     `;
+}
+
+
+// ─── batch (xlsx) ─────────────────────────────────────────────────────────────
+
+const batchState = {
+    file: null,
+    jobId: null,
+    pollTimer: null,
+};
+
+function onBatchFileChosen(e) {
+    const f = e.target.files && e.target.files[0];
+    batchState.file = f || null;
+    $("batch-filename").textContent = f ? f.name : "";
+    $("batch-start-btn").disabled = !f;
+}
+
+async function onBatchStart() {
+    if (!batchState.file) return;
+    onBatchReset({ keepFile: true });
+
+    const form = new FormData();
+    form.append("file", batchState.file);
+    form.append("model", $("model-select").value || "");
+
+    setBusy(true);
+    setStatus("Загружаем файл и запускаем обработку…");
+
+    try {
+        const r = await fetch("/api/classify/batch", { method: "POST", body: form });
+        if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+        const data = await r.json();
+        batchState.jobId = data.job_id;
+        $("batch-progress").hidden = false;
+        $("batch-progress-label").textContent = `Обработано: 0 / ${data.total}`;
+        $("batch-progress-status").textContent = "running";
+        $("batch-progress-bar").style.width = "0%";
+        $("batch-start-btn").disabled = true;
+        startBatchPolling();
+    } catch (e) {
+        flashError(`Ошибка: ${e.message}`);
+        $("batch-start-btn").disabled = false;
+    } finally {
+        setBusy(false);
+        setStatus("");
+    }
+}
+
+function startBatchPolling() {
+    stopBatchPolling();
+    batchState.pollTimer = setInterval(pollBatchStatus, 1500);
+    pollBatchStatus();
+}
+
+function stopBatchPolling() {
+    if (batchState.pollTimer) {
+        clearInterval(batchState.pollTimer);
+        batchState.pollTimer = null;
+    }
+}
+
+async function pollBatchStatus() {
+    if (!batchState.jobId) return;
+    try {
+        const r = await fetch(`/api/classify/batch/${batchState.jobId}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const s = await r.json();
+        const pct = s.total > 0 ? Math.round((s.processed / s.total) * 100) : 0;
+        $("batch-progress-label").textContent = `Обработано: ${s.processed} / ${s.total}`;
+        $("batch-progress-status").textContent = s.status;
+        $("batch-progress-bar").style.width = `${pct}%`;
+        if (s.errors_count > 0) {
+            $("batch-progress-errors").textContent = `Ошибок при обработке строк: ${s.errors_count}`;
+        }
+        if (s.status === "done" || s.status === "failed") {
+            stopBatchPolling();
+            $("batch-download-link").href = `/api/classify/batch/${batchState.jobId}/download`;
+            $("batch-done").hidden = false;
+        }
+    } catch (e) {
+        // не убиваем polling из-за разовой сетевой ошибки
+        console.warn("polling error:", e);
+    }
+}
+
+function onBatchReset(opts = {}) {
+    stopBatchPolling();
+    batchState.jobId = null;
+    if (!opts.keepFile) {
+        batchState.file = null;
+        $("batch-file").value = "";
+        $("batch-filename").textContent = "";
+        $("batch-start-btn").disabled = true;
+    }
+    $("batch-progress").hidden = true;
+    $("batch-done").hidden = true;
+    $("batch-progress-errors").textContent = "";
 }
 
 

@@ -1128,3 +1128,117 @@ footer {
         font-size: 1.75rem;
     }
 }
+
+
+/* ── top-level tabs ────────────────────────────────────────────────────── */
+
+.top-tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 1.25rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.25rem;
+    width: fit-content;
+}
+
+.top-tab {
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 500;
+    transition: background 120ms, color 120ms;
+}
+
+.top-tab:hover {
+    color: var(--text);
+}
+
+.top-tab.active {
+    background: var(--surface);
+    color: var(--text);
+    border-color: var(--border-strong);
+}
+
+
+/* ── batch panel ──────────────────────────────────────────────────────── */
+
+.batch-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.batch-upload {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+
+.batch-filename {
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    word-break: break-all;
+}
+
+.batch-progress {
+    margin-top: 1.25rem;
+    padding: 0.875rem 1rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.batch-progress-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.batch-progress-status {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.batch-progress-track {
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+}
+
+.batch-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+    transition: width 200ms ease-out;
+}
+
+.batch-progress-errors {
+    margin-top: 0.5rem;
+    color: var(--warning);
+    font-size: 0.8125rem;
+}
+
+.batch-done {
+    margin-top: 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.batch-done a.primary {
+    text-decoration: none;
+    display: inline-block;
+}

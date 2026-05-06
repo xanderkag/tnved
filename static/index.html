@@ -22,7 +22,15 @@
             <p class="subtitle">Профессиональный определитель кода Товарной номенклатуры ВЭД ЕАЭС</p>
         </header>
 
+        <nav class="top-tabs">
+            <button class="top-tab active" data-tab="single">Один товар</button>
+            <button class="top-tab" data-tab="batch">Пакет (Excel)</button>
+        </nav>
+
         <main>
+
+        <!-- ═══════════ РЕЖИМ: ОДИН ТОВАР ═══════════ -->
+        <div id="tab-single">
 
         <!-- ═══════════ ШАГ 1. ВВОД ═══════════ -->
         <section id="step-input" class="step">
@@ -162,6 +170,48 @@
                 <button id="copy-result-btn" class="primary">Скопировать код</button>
             </div>
         </section>
+
+        </div><!-- /tab-single -->
+
+
+        <!-- ═══════════ РЕЖИМ: ПАКЕТ (EXCEL) ═══════════ -->
+        <div id="tab-batch" hidden>
+            <div class="card">
+                <h2 class="batch-title">Пакетная классификация из Excel</h2>
+                <p class="hint">
+                    Загрузите .xlsx со списком товаров. Описание берётся из колонки с заголовком
+                    «Описание / Наименование / Товар» — или из первой колонки, если заголовка нет.
+                    На выходе — xlsx со столбцами: код, наименование, пошлина, уверенность,
+                    альтернативные коды.
+                </p>
+
+                <div class="batch-upload" id="batch-upload">
+                    <input id="batch-file" type="file" accept=".xlsx" hidden>
+                    <button id="batch-pick-btn" class="primary">Выбрать .xlsx</button>
+                    <span id="batch-filename" class="batch-filename"></span>
+                </div>
+
+                <div class="row" style="margin-top: 1rem;">
+                    <button id="batch-start-btn" class="primary" disabled>Запустить</button>
+                </div>
+
+                <div id="batch-progress" class="batch-progress" hidden>
+                    <div class="batch-progress-head">
+                        <span id="batch-progress-label">Обработано: 0 / 0</span>
+                        <span id="batch-progress-status" class="batch-progress-status">running</span>
+                    </div>
+                    <div class="batch-progress-track">
+                        <div id="batch-progress-bar" class="batch-progress-bar" style="width:0%"></div>
+                    </div>
+                    <div id="batch-progress-errors" class="batch-progress-errors"></div>
+                </div>
+
+                <div id="batch-done" class="batch-done" hidden>
+                    <a id="batch-download-link" class="primary" download>Скачать результат (xlsx)</a>
+                    <button id="batch-new-btn" class="ghost">Загрузить ещё файл</button>
+                </div>
+            </div>
+        </div><!-- /tab-batch -->
 
         </main>
 

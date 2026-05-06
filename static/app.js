@@ -56,6 +56,16 @@ document.addEventListener("DOMContentLoaded", () => {
     $("batch-file").addEventListener("change", onBatchFileChosen);
     $("batch-start-btn").addEventListener("click", onBatchStart);
     $("batch-new-btn").addEventListener("click", onBatchReset);
+
+    // Chat
+    $("chat-send-btn").addEventListener("click", onChatSend);
+    $("chat-reset-btn").addEventListener("click", onChatReset);
+    $("chat-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onChatSend();
+        }
+    });
 });
 
 
@@ -380,6 +390,138 @@ function renderResultStep(data) {
             ${checksHtml}
         </div>
     `;
+}
+
+
+// ─── chat ─────────────────────────────────────────────────────────────────────
+
+const chatState = {
+    chatId: null,
+    busy: false,
+};
+
+async function onChatSend() {
+    if (chatState.busy) return;
+    const input = $("chat-input");
+    const sendBtn = $("chat-send-btn");
+    const text = input.value.trim();
+    if (!text) return;
+
+    chatState.busy = true;
+    setBusy(true);
+    input.value = "";
+    input.disabled = true;
+    sendBtn.disabled = true;
+
+    appendChatMessage({ role: "user", content: text });
+    appendChatTyping();
+
+    let finalized = false;
+    try {
+        const url = chatState.chatId
+            ? `/api/chat/${chatState.chatId}/message`
+            : `/api/chat/start`;
+        const body = chatState.chatId
+            ? { text, model: $("model-select").value }
+            : { initial_description: text, model: $("model-select").value };
+
+        const r = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+        const data = await r.json();
+
+        chatState.chatId = data.chat_id;
+        renderChatMessages(data.messages);
+        finalized = data.phase === "finalized";
+    } catch (e) {
+        removeChatTyping();
+        appendChatMessage({ role: "assistant", content: `_Ошибка: ${e.message}_` });
+    } finally {
+        chatState.busy = false;
+        setBusy(false);
+        if (finalized) {
+            input.placeholder = "Чат завершён. Нажмите «Начать заново».";
+            // input + sendBtn остаются disabled
+        } else {
+            input.disabled = false;
+            sendBtn.disabled = false;
+            input.focus();
+        }
+    }
+}
+
+function onChatReset() {
+    chatState.chatId = null;
+    chatState.busy = false;
+    $("chat-messages").innerHTML = "";
+    const input = $("chat-input");
+    input.value = "";
+    input.disabled = false;
+    input.placeholder = "Опишите товар или ответьте на уточняющий вопрос…";
+    $("chat-send-btn").disabled = false;
+    input.focus();
+}
+
+function renderChatMessages(messages) {
+    const box = $("chat-messages");
+    box.innerHTML = "";
+    for (const m of messages) {
+        appendChatMessage(m);
+    }
+}
+
+function appendChatMessage(m) {
+    const box = $("chat-messages");
+    const wrap = document.createElement("div");
+    wrap.className = `chat-msg chat-msg-${m.role}`;
+    wrap.innerHTML = renderMarkdownLite(m.content || "");
+    box.appendChild(wrap);
+    box.scrollTop = box.scrollHeight;
+}
+
+function appendChatTyping() {
+    const box = $("chat-messages");
+    const wrap = document.createElement("div");
+    wrap.className = "chat-msg chat-msg-assistant chat-typing";
+    wrap.id = "chat-typing-indicator";
+    wrap.innerHTML = `<span class="chat-typing-dot"></span><span class="chat-typing-dot"></span><span class="chat-typing-dot"></span>`;
+    box.appendChild(wrap);
+    box.scrollTop = box.scrollHeight;
+}
+
+function removeChatTyping() {
+    const el = $("chat-typing-indicator");
+    if (el) el.remove();
+}
+
+// Минимальный safe-renderer: bold (**...**), inline code (`...`), italics (_..._), переводы строк.
+function renderMarkdownLite(s) {
+    // Сначала эскейпим HTML
+    let out = String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // Inline code: `code`
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold: **text**
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic: _text_
+    out = out.replace(/(^|[\s(])_([^_]+)_(?=[\s.,!?)]|$)/g, '$1<em>$2</em>');
+    // Списки: строки, начинающиеся с "- "
+    const lines = out.split("\n");
+    const result = [];
+    let inList = false;
+    for (const ln of lines) {
+        if (/^- /.test(ln)) {
+            if (!inList) { result.push("<ul>"); inList = true; }
+            result.push(`<li>${ln.slice(2)}</li>`);
+        } else {
+            if (inList) { result.push("</ul>"); inList = false; }
+            result.push(ln);
+        }
+    }
+    if (inList) result.push("</ul>");
+    return result.join("\n").replace(/\n/g, "<br>");
 }
 
 

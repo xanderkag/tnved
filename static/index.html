@@ -25,6 +25,7 @@
         <nav class="top-tabs">
             <button class="top-tab active" data-tab="single">Один товар</button>
             <button class="top-tab" data-tab="batch">Пакет (Excel)</button>
+            <button class="top-tab" data-tab="chat">Чат</button>
         </nav>
 
         <main>
@@ -212,6 +213,27 @@
                 </div>
             </div>
         </div><!-- /tab-batch -->
+
+
+        <!-- ═══════════ РЕЖИМ: ЧАТ ═══════════ -->
+        <div id="tab-chat" hidden>
+            <div class="card chat-card">
+                <div class="chat-head">
+                    <h2 class="chat-title">Свободный диалог</h2>
+                    <button id="chat-reset-btn" class="ghost">Начать заново</button>
+                </div>
+                <div id="chat-messages" class="chat-messages"></div>
+                <div class="chat-input-row">
+                    <textarea id="chat-input" rows="2"
+                        placeholder="Опишите товар или ответьте на уточняющий вопрос…"></textarea>
+                    <button id="chat-send-btn" class="primary">Отправить</button>
+                </div>
+                <p class="hint chat-hint">
+                    Подсказка: <kbd>⌘ ↵</kbd> / <kbd>Ctrl ↵</kbd> — отправить.
+                    Чат сам решит, когда задать уточнения, а когда выдать код.
+                </p>
+            </div>
+        </div><!-- /tab-chat -->
 
         </main>
 

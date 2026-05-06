@@ -29,6 +29,7 @@ STATIC_DIR = BASE / "static"
 DEFAULT_LLM = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "5"))
 BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
+CHAT_MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "6"))
 
 # ─── глобальные ресурсы ───────────────────────────────────────────────────────
 
@@ -36,6 +37,7 @@ class App:
     store: TNVEDStore | None = None
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
+    chats: dict[str, dict] = {}
 
 
 state = App()
@@ -157,6 +159,168 @@ async def classify_get(session_id: str):
 @app.get("/api/models")
 async def models():
     return {"models": [DEFAULT_LLM], "default": DEFAULT_LLM}
+
+
+# ─── chat (свободный диалог) ──────────────────────────────────────────────────
+
+class ChatStartRequest(BaseModel):
+    initial_description: str = ""
+    model: str = DEFAULT_LLM
+
+
+class ChatMessageRequest(BaseModel):
+    text: str
+    model: str = DEFAULT_LLM
+
+
+def _chat_format_finalization(triage_res: dict, classify_res: dict) -> str:
+    primary = classify_res.get("primary") or {}
+    code = primary.get("code", "—")
+    duty = primary.get("duty_rate") or "—"
+    conf = primary.get("confidence", "—")
+    reasoning = primary.get("reasoning", "") or ""
+    full_path = primary.get("full_path") or ""
+
+    lines = [f"**Код:** `{code}`"]
+    if full_path:
+        lines.append(f"_{full_path}_")
+    lines.append(f"**Пошлина:** {duty}  **Уверенность:** {conf}")
+    if reasoning:
+        lines.append("")
+        lines.append(reasoning)
+
+    alts = classify_res.get("alternatives") or []
+    if alts:
+        lines.append("")
+        lines.append("**Альтернативы:**")
+        for a in alts[:2]:
+            ac = a.get("code", "—")
+            ad = a.get("duty_rate") or "—"
+            why = a.get("why_close") or ""
+            lines.append(f"- `{ac}` ({ad}) — {why}")
+
+    checks = classify_res.get("checks_required") or []
+    if checks:
+        lines.append("")
+        lines.append("**Стоит проверить вручную:**")
+        for c in checks[:3]:
+            lines.append(f"- {c}")
+    return "\n".join(lines)
+
+
+def _chat_format_questions(triage_res: dict) -> str:
+    group_code = triage_res.get("group_code", "")
+    group_name = triage_res.get("group_name", "")
+    questions = triage_res.get("questions", [])
+
+    lines = []
+    if group_code:
+        head = f"Похоже на группу **{group_code}**"
+        if group_name:
+            head += f" — {group_name}"
+        lines.append(head + ".")
+
+    if questions:
+        lines.append("Уточню:")
+        for q in questions[:3]:
+            lines.append(f"- {q.get('question', '')}")
+    else:
+        lines.append("Пришлите больше деталей — состав, назначение, форму, технические параметры.")
+    return "\n".join(lines)
+
+
+async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
+    chat = state.chats[chat_id]
+    chat["messages"].append({"role": "user", "content": text})
+    chat["description"] = (chat["description"] + "\n" + text).strip() if chat["description"] else text
+
+    triage_res = await triage(state.store, chat["description"], model)
+
+    user_turns = sum(1 for m in chat["messages"] if m["role"] == "user")
+    completeness = triage_res.get("completeness", "low")
+    questions = triage_res.get("questions", [])
+
+    finalize = (
+        completeness == "high"
+        or not questions
+        or user_turns >= CHAT_MAX_TURNS
+    )
+
+    if finalize:
+        result = await classify(
+            state.store,
+            description=chat["description"],
+            group_code=triage_res.get("group_code", ""),
+            model=model,
+        )
+        chat["triage"] = triage_res
+        chat["result"] = result
+        chat["phase"] = "finalized"
+        chat["messages"].append({
+            "role": "assistant",
+            "content": _chat_format_finalization(triage_res, result),
+        })
+    else:
+        chat["triage"] = triage_res
+        chat["messages"].append({
+            "role": "assistant",
+            "content": _chat_format_questions(triage_res),
+        })
+
+    return {
+        "chat_id": chat_id,
+        "phase": chat["phase"],
+        "messages": chat["messages"],
+        "result": chat.get("result"),
+    }
+
+
+@app.post("/api/chat/start")
+async def chat_start(req: ChatStartRequest):
+    chat_id = uuid.uuid4().hex[:12]
+    state.chats[chat_id] = {
+        "id": chat_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "messages": [],
+        "description": "",
+        "phase": "gathering",
+        "model": req.model,
+        "triage": None,
+        "result": None,
+    }
+
+    initial = req.initial_description.strip()
+    if initial:
+        return await _chat_handle_user(chat_id, initial, req.model)
+
+    state.chats[chat_id]["messages"].append({
+        "role": "assistant",
+        "content": "Опишите товар — состав, назначение, форму, технические параметры. Я задам уточняющие вопросы и подберу код ТН ВЭД.",
+    })
+    return {
+        "chat_id": chat_id,
+        "phase": "gathering",
+        "messages": state.chats[chat_id]["messages"],
+        "result": None,
+    }
+
+
+@app.post("/api/chat/{chat_id}/message")
+async def chat_message(chat_id: str, req: ChatMessageRequest):
+    chat = state.chats.get(chat_id)
+    if not chat:
+        raise HTTPException(404, "Чат не найден")
+    if chat["phase"] == "finalized":
+        raise HTTPException(409, "Чат уже завершён — начните новый")
+    return await _chat_handle_user(chat_id, req.text, req.model)
+
+
+@app.get("/api/chat/{chat_id}")
+async def chat_get(chat_id: str):
+    chat = state.chats.get(chat_id)
+    if not chat:
+        raise HTTPException(404, "Чат не найден")
+    return chat
 
 
 # ─── batch (xlsx in → xlsx out) ───────────────────────────────────────────────

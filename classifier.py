@@ -12,6 +12,7 @@ OPENAI_BASE_URL.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -30,6 +31,7 @@ def get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
             base_url=os.environ.get("OPENAI_BASE_URL") or None,
+            timeout=float(os.environ.get("LLM_TIMEOUT", "60")),
         )
     return _client
 
@@ -187,11 +189,15 @@ async def classify(
     top_k: int = 12,
 ) -> dict:
     """Финальная классификация: ищем кандидатов в группе, LLM выбирает код."""
-    candidates = store.search(description, top_k=top_k, group_code=group_code)
+    # store.search — sync, тяжёлый CPU (sentence-transformers + FAISS).
+    # Уносим в thread-pool, чтобы не блокировать event loop.
+    candidates = await asyncio.to_thread(
+        store.search, description, top_k=top_k, group_code=group_code
+    )
 
     # Если в группе ничего не нашлось — fallback на поиск без фильтра
     if not candidates:
-        candidates = store.search(description, top_k=top_k)
+        candidates = await asyncio.to_thread(store.search, description, top_k=top_k)
 
     candidates_text = "\n".join(
         f"  {i+1}. [{c['code']}] {c.get('full_path') or c['description']}"

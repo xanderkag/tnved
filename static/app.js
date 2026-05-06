@@ -17,13 +17,14 @@ const state = {
 document.addEventListener("DOMContentLoaded", () => {
     loadModels();
 
-    // Top-level tabs (single / batch)
+    // Top-level tabs (single / batch / chat)
     qsa(".top-tab").forEach(btn => {
         btn.addEventListener("click", () => {
             const tab = btn.dataset.tab;
             qsa(".top-tab").forEach(b => b.classList.toggle("active", b === btn));
             $("tab-single").hidden = tab !== "single";
             $("tab-batch").hidden = tab !== "batch";
+            $("tab-chat").hidden = tab !== "chat";
         });
     });
 

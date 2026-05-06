@@ -34,3 +34,8 @@ Thumbs.db
 
 # Streamlit (legacy)
 .streamlit/
+
+# Локальные демо-файлы (генерируются при превью)
+demo_input.xlsx
+static/demo_input.xlsx
+.claude/

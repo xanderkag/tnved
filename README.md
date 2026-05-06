@@ -1,172 +1,107 @@
 # ТН ВЭД Ассистент
 
-Профессиональный определитель кода Товарной номенклатуры внешнеэкономической деятельности ЕАЭС для декларантов.
+Определитель кода Товарной номенклатуры ВЭД ЕАЭС для декларантов. FastAPI + LLM + FAISS.
+
+> Форк апстрима [xanderkag/tnved](https://github.com/xanderkag/tnved). Локальный Ollama выпилен, теперь любой OpenAI-совместимый endpoint. Добавлены: пошлины из TWS.BY, batch-режим (xlsx), чат-режим, Docker-обвязка.
 
 ## Возможности
 
-- **Двухстадийный pipeline** классификации:
-  1. **Triage** — определение группы ТН ВЭД (2 знака) + оценка полноты описания + адаптивные уточняющие вопросы
-  2. **Classify** — финальный 10-значный код + 1–2 альтернативы + применённые ОПИ
-- **Два режима ввода:** простой (текст) и подробный (структурированная форма с 8 полями)
-- **Векторный поиск** по 27 168 кодам ТН ВЭД с фильтром по предопределённой группе (точность ↑)
-- **Ссылки на ОПИ** (Основные правила интерпретации) с пояснениями
-- **Полная иерархия** классификации: раздел → группа → позиция → субпозиция → подсубпозиция
-- **Локальные LLM** через Ollama (qwen2.5:14b по умолчанию), без внешних API
-- **Структурированный JSON-вывод** от LLM (`format='json'`) — стабильный парсинг
+- **Двухстадийный pipeline:** triage (определение группы + уточняющие вопросы) → classify (10-значный код + альтернативы + ОПИ).
+- **Три UI-режима:**
+  - **Один товар** — пошаговая форма с уточнениями.
+  - **Пакет (Excel)** — загрузка xlsx, прогресс-бар, скачивание xlsx с результатами. До 500 строк, параллелизм 5.
+  - **Чат** — свободный диалог с авто-финализацией.
+- **Свежие коды + пошлины** — слияние [infoculture/opencustoms](https://github.com/infoculture/opencustoms) (иерархия) + [TWS.BY](https://www.tws.by/tws/tnved/download/excel) (актуальные листья + ставка пошлины, обновляется ежедневно). 31 622 кода в SQLite, 13 285 со ставкой.
+- **Векторный поиск** через `intfloat/multilingual-e5-base` + FAISS, фильтрация по группе.
+- **Любой OpenAI-совместимый бэкенд** (OpenAI, vLLM, внутренний шлюз) — `OPENAI_BASE_URL` и `LLM_MODEL` через env.
+- **JSON-режим LLM** для стабильного парсинга.
 
-## Структура проекта
+## Структура
 
 ```
-TNVED/
-├── api.py              # FastAPI бэкенд
-├── classifier.py       # Двухстадийный pipeline (triage + classify)
-├── tnved_data.py       # Загрузка FAISS, SQLite, embedder
-├── gri.py              # 9 правил ОПИ (Основные правила интерпретации)
-├── fetch_tnved.py      # Скачать справочник ТН ВЭД (CSV из открытых источников)
-├── parse_tnved.py      # Парсинг CSV → SQLite
-├── build_index.py      # Embeddings → FAISS-индекс
-├── app.py              # ⚠️ Старая Streamlit-версия (deprecated)
-├── requirements.txt
-├── static/             # Frontend (HTML + vanilla JS + CSS)
-│   ├── index.html
-│   ├── app.js
-│   └── app.css
-├── data/
-│   ├── raw/tnved.csv   # Исходник от ФТС (~5 МБ)
-│   ├── tnved.db        # SQLite (28k записей)
-│   ├── tnved.faiss     # Векторный индекс (~80 МБ)
-│   └── tnved_meta.json # Метаданные кодов
-├── README.md
-└── TECH_DEBT.md        # Известные ограничения и план развития
+api.py              # FastAPI: /api/classify/start|finalize, /api/classify/batch, /api/chat/*
+classifier.py       # triage + classify, get_client (AsyncOpenAI с timeout)
+tnved_data.py       # TNVEDStore: FAISS + SQLite + sentence-transformers
+gri.py              # 9 ОПИ
+fetch_tnved.py      # download infoculture CSV + TWS.BY xlsx
+parse_tnved.py      # CSV+xlsx → SQLite (схема codes + meta)
+build_index.py      # embeddings → FAISS, meta.json
+demo_server.py      # ⚠️ mock-API для превью без LLM/FAISS (НЕ в Docker-образе)
+Dockerfile
+docker-compose.yml  # app + Caddy reverse-proxy на :8000
+Caddyfile
+.env.example
+static/{index.html,app.js,app.css}
+data/               # генерируется fetch+parse+build_index, в .gitignore
+TECH_DEBT.md        # известные ограничения, B-беклог архитектурного ревью
 ```
 
-## Установка
-
-**Требования:** Python 3.9+, Ollama, ~6 GB свободного места (индекс + модели).
+## Запуск через Docker (production)
 
 ```bash
-cd /Users/alexanderliapustin/Desktop/TNVED
-
-# 1. Виртуальное окружение
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-
-# 2. Скачать данные (если data/ пуста)
-venv/bin/python fetch_tnved.py
-venv/bin/python parse_tnved.py
-venv/bin/python build_index.py
-
-# 3. Скачать LLM-модель Ollama
-ollama pull qwen2.5:14b
-ollama serve  # если ещё не запущена
-
-# 4. Запустить сервер
-venv/bin/uvicorn api:app --host 127.0.0.1 --port 8765
+cp .env.example .env
+nano .env   # OPENAI_API_KEY, OPENAI_BASE_URL (если внутренний), HOST_PORT, COMPOSE_PROJECT_NAME
+docker compose up -d --build
 ```
 
-Открыть **http://localhost:8765**
+Билд ~3–7 минут: тянет infoculture-CSV + TWS.BY-xlsx + e5-base из HF Hub, считает FAISS.
 
-## Архитектура
+Healthcheck: `GET /health` (200 если store загружен, 503 в degraded-режиме). Контейнер сам рестартится при сломанной БД.
 
-```
-              ┌───────────────────────┐
-              │   Frontend (vanilla)  │
-              │  3 шага: ввод →       │
-              │  уточнения → итог     │
-              └──────────┬────────────┘
-                         │
-                         ▼  HTTP/JSON
-              ┌──────────────────────┐
-              │   FastAPI (api.py)   │
-              │   in-memory sessions │
-              └──────────┬───────────┘
-                         │
-            ┌────────────┼─────────────┐
-            ▼            ▼             ▼
-      ┌──────────┐ ┌──────────┐ ┌──────────┐
-      │ Triage   │ │ Search   │ │Classify  │
-      │ Stage 1  │ │ FAISS+   │ │ Stage 2  │
-      │ (LLM)    │ │ filter   │ │ (LLM)    │
-      └────┬─────┘ │ by group │ └────┬─────┘
-           │       └─────┬────┘      │
-           └─────────────┼───────────┘
-                         ▼
-                  ┌──────────────┐
-                  │ Ollama       │
-                  │ qwen2.5:14b  │
-                  │ format=json  │
-                  └──────────────┘
+## Запуск локально (разработка)
+
+```bash
+python -m venv venv
+venv/Scripts/python -m pip install -r requirements.txt   # Windows; на *nix venv/bin/python
+
+venv/Scripts/python fetch_tnved.py     # качает CSV+xlsx в data/raw/
+venv/Scripts/python parse_tnved.py     # → data/tnved.db
+venv/Scripts/python build_index.py     # → data/tnved.faiss + tnved_meta.json (5–10 мин)
+
+set OPENAI_API_KEY=sk-...
+venv/Scripts/python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-## API
+Открыть **http://localhost:8000**.
 
-### `POST /api/classify/start`
-Старт сессии. Принимает либо `description` (простой режим), либо `fields` (подробный).
+## Превью без LLM (для UI-работы)
 
-```json
-{
-  "mode": "simple",
-  "description": "хлопковая ткань суровая, 150 г/м²",
-  "model": "qwen2.5:14b"
-}
+```bash
+venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 ```
 
-Ответ:
-```json
-{
-  "session_id": "abc123...",
-  "group": { "code": "52", "name": "Хлопок" },
-  "completeness": "medium",
-  "missing_aspects": ["плотность ниток", "тип переплетения"],
-  "questions": [
-    { "id": "q1", "question": "...", "hint": "..." }
-  ]
-}
-```
+Возвращает захардкоженные ответы на тех же эндпоинтах. Полезно для верстки/демонстрации, но **классификация не работает** (всё отдаёт посудомойку 8422110000).
 
-### `POST /api/classify/finalize`
-Получение финального кода. Принимает ответы на уточняющие вопросы.
+## Конфигурация (env)
 
-```json
-{
-  "session_id": "abc123...",
-  "answers": [
-    { "id": "q1", "question": "...", "answer": "..." }
-  ]
-}
-```
+| Переменная | Дефолт | Что |
+|---|---|---|
+| `OPENAI_API_KEY` | — | обязательна (для Ollama-совместимых можно `EMPTY`) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | внутренний vLLM/шлюз — указать сюда |
+| `LLM_MODEL` | `gpt-4o-mini` | имя модели у провайдера |
+| `LLM_TIMEOUT` | `60` | сек, верхний таймаут на LLM-вызов |
+| `BATCH_CONCURRENCY` | `5` | параллельных LLM-запросов в одном батче |
+| `BATCH_MAX_ROWS` | `500` | максимум строк в xlsx |
+| `CHAT_MAX_TURNS` | `6` | после скольких ходов чат финализирует автоматически |
+| `MAX_DESCRIPTION_LEN` | `5000` | максимум символов на одно описание |
+| `SESSION_TTL_HOURS` | `24` | через сколько чистится in-memory сессия/чат/батч |
+| `CLEANUP_INTERVAL_SECONDS` | `600` | как часто запускается cleanup-loop |
 
-Ответ:
-```json
-{
-  "result": {
-    "primary": {
-      "code": "5208210000",
-      "reasoning": "...",
-      "confidence": "high",
-      "hierarchy": [
-        { "code": "52", "description": "..." },
-        { "code": "5208", "description": "..." },
-        ...
-      ]
-    },
-    "alternatives": [...],
-    "gri_applied": ["1", "6"],
-    "gri_explained": [...],
-    "checks_required": [...]
-  }
-}
-```
+## API (важное)
 
-### `GET /api/models`
-Список моделей Ollama.
-
-## Данные
-
-**Источник:** [infoculture/opencustoms](https://github.com/infoculture/opencustoms) — данные ФТС России в формате CSV.
-
-⚠️ Репозиторий не обновляется с 2017 года — для production нужен свежий источник (см. TECH_DEBT.md).
+| Метод | URL | Назначение |
+|---|---|---|
+| `POST` | `/api/classify/start` | Один товар: triage |
+| `POST` | `/api/classify/finalize` | Один товар: финальный код |
+| `POST` | `/api/classify/batch` | xlsx → job_id (multipart) |
+| `GET`  | `/api/classify/batch/{job_id}` | Статус батча |
+| `GET`  | `/api/classify/batch/{job_id}/download` | xlsx-результат |
+| `POST` | `/api/chat/start` | Новый чат |
+| `POST` | `/api/chat/{id}/message` | Реплика в чат |
+| `GET`  | `/api/chat/{id}` | Снимок чата |
+| `GET`  | `/api/models` | `{models:[...], default:...}` |
+| `GET`  | `/health` | 200 если store загружен, иначе 503 |
 
 ## Лицензия
 
-Прототип. Не для использования в production без доработок (см. TECH_DEBT.md).
+Внутренний инструмент TAIPIT, прототип конкурса AI-инициатив. Не для внешнего production без доработок ([TECH_DEBT.md](TECH_DEBT.md)).

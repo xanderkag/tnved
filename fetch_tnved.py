@@ -1,13 +1,15 @@
 """
 Скачивает данные ТН ВЭД ЕАЭС из открытых источников.
 
-Порядок попыток:
-1. GitHub-репозиторий с CSV-данными
-2. PyPI-пакет tnved (если установлен)
+Стратегия:
+1. Иерархия (группы / позиции / субпозиции) — берём из infoculture/opencustoms.
+   Сохраняется как data/raw/tnved.csv.
+2. Свежие коды + актуальные ставки пошлин — берём с TWS.BY (обновляется ежедневно).
+   Сохраняется как data/raw/tws_tnved.xlsx.
 
-Если ничего не получилось — выводит инструкции для ручного скачивания.
+parse_tnved.py сливает оба источника: иерархия из (1), свежие листья + duty_rate из (2).
 
-Результат: data/raw/tnved.csv или data/raw/tnved.xml
+Если что-то одно недоступно — работает в режиме fallback на оставшееся.
 """
 
 from __future__ import annotations
@@ -18,27 +20,26 @@ import requests
 
 RAW_DIR = os.path.join(os.path.dirname(__file__), "data", "raw")
 
-# Известные открытые источники CSV с ТН ВЭД (проверено)
-SOURCES = [
+# Источник иерархии: пробуем по порядку, останавливаемся на первом успешном.
+HIERARCHY_SOURCES = [
     {
-        # Открытые данные ФТС России — проверенный источник, ~11k строк
-        # Столбцы: КОД, SIMPLE_NAM
         "url": "https://raw.githubusercontent.com/infoculture/opencustoms/master/data/tnved.csv",
         "filename": "tnved.csv",
         "description": "GitHub infoculture/opencustoms (ФТС открытые данные)",
     },
     {
-        # Excel со всеми кодами + ставками — обновляется ежедневно
-        "url": "https://www.tws.by/tws/tnved/download/excel",
-        "filename": "tnved.xlsx",
-        "description": "TWS.BY Excel (актуальные коды + ставки)",
-    },
-    {
         "url": "https://raw.githubusercontent.com/nicothin/TNVED/master/tnved.csv",
         "filename": "tnved.csv",
-        "description": "GitHub nicothin/TNVED",
+        "description": "GitHub nicothin/TNVED (резерв)",
     },
 ]
+
+# Свежие листья + ставки. Качаем всегда, даже если иерархия уже есть.
+TWS_SOURCE = {
+    "url": "https://www.tws.by/tws/tnved/download/excel",
+    "filename": "tws_tnved.xlsx",
+    "description": "TWS.BY Excel (актуальные коды + duty rate, обновляется ежедневно)",
+}
 
 MANUAL_INSTRUCTIONS = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -74,7 +75,7 @@ def try_download(source: dict) -> bool:
 
     print(f"Попытка: {description} ...")
     try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         if len(resp.content) < 10_000:
             print(f"  Файл слишком маленький ({len(resp.content)} байт), пропускаем.")
@@ -128,8 +129,8 @@ def try_tnved_package() -> bool:
         return False
 
 
-def already_exists() -> str | None:
-    """Проверяет, есть ли уже скачанный файл."""
+def hierarchy_exists() -> str | None:
+    """Иерархия уже скачана?"""
     for name in ("tnved.csv", "tnved.xml", "tnved.xlsx"):
         path = os.path.join(RAW_DIR, name)
         if os.path.exists(path) and os.path.getsize(path) > 10_000:
@@ -137,25 +138,52 @@ def already_exists() -> str | None:
     return None
 
 
-def main():
-    existing = already_exists()
-    if existing:
-        print(f"Файл уже существует: {existing}")
-        print("Удалите его и запустите повторно, чтобы обновить данные.")
-        return
+def tws_exists() -> str | None:
+    path = os.path.join(RAW_DIR, TWS_SOURCE["filename"])
+    if os.path.exists(path) and os.path.getsize(path) > 10_000:
+        return path
+    return None
 
-    for source in SOURCES:
+
+def fetch_hierarchy() -> bool:
+    existing = hierarchy_exists()
+    if existing:
+        print(f"Иерархия уже скачана: {existing}")
+        return True
+
+    for source in HIERARCHY_SOURCES:
         if try_download(source):
-            print("\nГотово. Запустите: python parse_tnved.py")
-            return
+            return True
 
     print("Пробуем пакет tnved ...")
     if try_tnved_package():
-        print("\nГотово. Запустите: python parse_tnved.py")
-        return
+        return True
 
-    print(MANUAL_INSTRUCTIONS)
-    sys.exit(1)
+    return False
+
+
+def fetch_tws() -> bool:
+    existing = tws_exists()
+    if existing:
+        print(f"TWS.BY уже скачан: {existing}")
+        return True
+    return try_download(TWS_SOURCE)
+
+
+def main():
+    ok_hier = fetch_hierarchy()
+    ok_tws = fetch_tws()
+
+    if not ok_hier and not ok_tws:
+        print(MANUAL_INSTRUCTIONS)
+        sys.exit(1)
+
+    if not ok_hier:
+        print("\nWARN: иерархия не скачана — parse_tnved.py соберёт что сможет из TWS.BY.")
+    if not ok_tws:
+        print("\nWARN: TWS.BY не скачан — у кодов не будет свежих ставок.")
+
+    print("\nГотово. Запустите: python parse_tnved.py")
 
 
 if __name__ == "__main__":

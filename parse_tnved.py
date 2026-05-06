@@ -1,9 +1,21 @@
 """
 Парсит сырые данные ТН ВЭД (CSV / XML / Excel) и сохраняет в SQLite.
 
+Источники:
+  data/raw/tnved.csv|xml — иерархия (группы → позиции → ... → листья)
+  data/raw/tws_tnved.xlsx — свежие листья + ставка пошлины (TWS.BY, обновл. ежедневно)
+
+Алгоритм:
+  1) Читаем иерархию (если есть) → получаем все уровни кодов с описаниями.
+  2) Читаем TWS.BY (если есть) → 10-значные листья с описанием и duty_rate.
+  3) Сливаем: TWS.BY перетирает описание для совпадающих кодов и ставит duty_rate.
+     Коды только в TWS.BY — добавляются как новые листья (level=4).
+     Коды только в иерархии — остаются (без duty_rate).
+
 Запуск: python parse_tnved.py
 Результат: data/tnved.db
-  - таблица codes(code, description, level, parent_code, full_path)
+  - таблица codes(code, description, level, parent_code, full_path, duty_rate, data_source)
+  - таблица meta(key, value) — хранит дату обновления / общую статистику
 """
 
 from __future__ import annotations
@@ -17,6 +29,7 @@ from pathlib import Path
 
 RAW_DIR = Path(__file__).parent / "data" / "raw"
 DB_PATH = Path(__file__).parent / "data" / "tnved.db"
+TWS_PATH = RAW_DIR / "tws_tnved.xlsx"
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -170,25 +183,97 @@ def parse_excel(path: Path) -> list[dict]:
     return rows
 
 
-def load_raw_data() -> list[dict]:
-    """Находит и парсит первый доступный файл в data/raw/."""
+def parse_tws(path: Path) -> dict[str, dict]:
+    """
+    Парсит xlsx с TWS.BY (лист «ТНВЭД», столбцы: Код | Наименование | Тариф | Подробности).
+    Возвращает {code: {description, duty_rate, full_path_tws}}.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    ws = wb["ТНВЭД"] if "ТНВЭД" in wb.sheetnames else wb.active
+
+    rows = ws.iter_rows(values_only=True)
+    next(rows, None)  # пропускаем заголовок
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        if not row or len(row) < 3:
+            continue
+        code, name, tariff, *_ = row
+        if code is None or name is None:
+            continue
+        code = str(code).strip().lstrip("'\"")
+        if not code.isdigit():
+            continue
+        full_path_tws = str(name).strip()
+        # Описание листового кода — последний сегмент пути.
+        # В TWS-выгрузке сегменты разделены символом " 🠺 ".
+        leaf_desc = full_path_tws.split(" 🠺 ")[-1].strip().rstrip(":").strip()
+        duty = str(tariff).strip() if tariff is not None else None
+        out[code] = {
+            "description": leaf_desc or full_path_tws,
+            "duty_rate": duty,
+            "full_path_tws": full_path_tws,
+        }
+
+    wb.close()
+    return out
+
+
+def load_hierarchy() -> list[dict]:
+    """Иерархия. Возвращает [] если файл не найден."""
     candidates = [
         (RAW_DIR / "tnved.csv",   parse_csv),
         (RAW_DIR / "tnved.xml",   parse_xml),
         (RAW_DIR / "tnved.xlsx",  parse_excel),
     ]
-
     for path, parser in candidates:
         if path.exists() and path.stat().st_size > 1000:
-            print(f"Парсим: {path}")
+            print(f"Парсим иерархию: {path}")
             return parser(path)
+    return []
 
-    print("Файл данных не найден в data/raw/")
-    print("Запустите: python fetch_tnved.py")
-    sys.exit(1)
+
+def load_tws() -> dict[str, dict]:
+    """Свежие листья с TWS.BY. Возвращает {} если файл не найден."""
+    if not TWS_PATH.exists() or TWS_PATH.stat().st_size < 1000:
+        return {}
+    print(f"Парсим TWS.BY: {TWS_PATH}")
+    return parse_tws(TWS_PATH)
 
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
+
+def merge_sources(hier: list[dict], tws: dict[str, dict]) -> list[dict]:
+    """
+    Сливает иерархию и TWS-листья.
+    Для совпадающих кодов TWS-описание перетирает иерархическое (свежее).
+    Коды только в TWS добавляются как новые листья.
+    """
+    by_code: dict[str, dict] = {}
+    for r in hier:
+        code = r["code"]
+        by_code[code] = {
+            "code": code,
+            "description": r["description"],
+            "duty_rate": None,
+            "data_source": "hierarchy",
+        }
+    for code, t in tws.items():
+        if code in by_code:
+            by_code[code]["description"] = t["description"]
+            by_code[code]["duty_rate"] = t["duty_rate"]
+            by_code[code]["data_source"] = "hierarchy+tws"
+        else:
+            by_code[code] = {
+                "code": code,
+                "description": t["description"],
+                "duty_rate": t["duty_rate"],
+                "data_source": "tws",
+            }
+    return list(by_code.values())
+
 
 def save_to_db(rows: list[dict]):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -204,16 +289,17 @@ def save_to_db(rows: list[dict]):
             description TEXT NOT NULL,
             level       INTEGER NOT NULL,
             parent_code TEXT,
-            full_path   TEXT
+            full_path   TEXT,
+            duty_rate   TEXT,
+            data_source TEXT
         )
     """)
+    cur.execute("CREATE INDEX idx_level ON codes(level)")
 
-    cur.execute("""
-        CREATE INDEX idx_level ON codes(level)
-    """)
+    cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
 
     print("Строим полные пути ...")
-    paths = build_full_paths(rows)
+    paths = build_full_paths([{"code": r["code"], "description": r["description"]} for r in rows])
 
     records = [
         (
@@ -222,36 +308,47 @@ def save_to_db(rows: list[dict]):
             code_to_level(r["code"]),
             parent_code(r["code"]),
             paths.get(r["code"], r["description"]),
+            r.get("duty_rate"),
+            r.get("data_source", "hierarchy"),
         )
         for r in rows
     ]
 
     cur.executemany(
-        "INSERT OR IGNORE INTO codes VALUES (?,?,?,?,?)",
+        "INSERT OR IGNORE INTO codes VALUES (?,?,?,?,?,?,?)",
         records,
     )
+
+    from datetime import datetime
+    cur.execute("INSERT INTO meta VALUES (?,?)", ("built_at", datetime.utcnow().isoformat()))
+    cur.execute("INSERT INTO meta VALUES (?,?)", ("total", str(len(records))))
 
     conn.commit()
 
     total = cur.execute("SELECT COUNT(*) FROM codes").fetchone()[0]
     leaves = cur.execute("SELECT COUNT(*) FROM codes WHERE level=4").fetchone()[0]
+    with_rate = cur.execute("SELECT COUNT(*) FROM codes WHERE duty_rate IS NOT NULL").fetchone()[0]
     conn.close()
 
-    print(f"Сохранено записей: {total:,}  (листовых кодов: {leaves:,})")
+    print(f"Сохранено записей: {total:,}  (листовых: {leaves:,}, со ставкой: {with_rate:,})")
 
 
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    rows = load_raw_data()
-    print(f"Прочитано строк: {len(rows):,}")
+    hier = load_hierarchy()
+    tws = load_tws()
 
-    if len(rows) < 100:
-        print("Слишком мало записей — возможно, файл повреждён или неверный формат.")
+    if not hier and not tws:
+        print("Не нашёл ни иерархию, ни TWS.BY. Запустите fetch_tnved.py.")
         sys.exit(1)
 
-    # Нормализуем коды (убираем незначащие нули в начале, если они лишние)
-    # Оставляем как есть — parse_* уже возвращают нормализованные коды
+    print(f"Иерархия: {len(hier):,} строк, TWS.BY: {len(tws):,} кодов")
+    rows = merge_sources(hier, tws)
+
+    if len(rows) < 100:
+        print("Слишком мало записей после слияния — что-то пошло не так.")
+        sys.exit(1)
 
     save_to_db(rows)
     print(f"\nГотово: {DB_PATH}")

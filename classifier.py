@@ -221,15 +221,19 @@ async def classify(
     result.setdefault("gri_applied", [])
     result.setdefault("checks_required", [])
 
-    # Обогащаем коды иерархией и текстами ОПИ
+    # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]
     primary["hierarchy"] = store.hierarchy(code)
-    primary["full_path"] = store.code_to_meta.get(code, {}).get("full_path")
+    meta = store.code_to_meta.get(code, {})
+    primary["full_path"] = meta.get("full_path")
+    primary["duty_rate"] = meta.get("duty_rate")
 
     for alt in result["alternatives"]:
         alt_code = alt.get("code", "")
         alt["hierarchy"] = store.hierarchy(alt_code)
-        alt["full_path"] = store.code_to_meta.get(alt_code, {}).get("full_path")
+        alt_meta = store.code_to_meta.get(alt_code, {})
+        alt["full_path"] = alt_meta.get("full_path")
+        alt["duty_rate"] = alt_meta.get("duty_rate")
 
     result["gri_explained"] = [
         {"code": code, "text": gri_text(code)}

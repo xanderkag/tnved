@@ -894,7 +894,33 @@ footer {
     display: inline-block;
     border: 1px solid rgba(16, 185, 129, 0.3);
     letter-spacing: 0.04em;
+}
+
+.result-code-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
     margin-bottom: 1.25rem;
+}
+
+.duty-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.625rem;
+    border-radius: var(--radius-sm);
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.duty-badge-large {
+    padding: 0.5rem 0.875rem;
+    font-size: 1rem;
 }
 
 .hierarchy {

@@ -38,12 +38,21 @@ def load_leaves() -> list[dict]:
     cur = conn.cursor()
     # Берём все коды, не только level=4, чтобы не зависеть от качества данных
     cur.execute("""
-        SELECT code, description, full_path
+        SELECT code, description, full_path, duty_rate, data_source
         FROM codes
         WHERE level >= 3
         ORDER BY code
     """)
-    rows = [{"code": r[0], "description": r[1], "full_path": r[2]} for r in cur.fetchall()]
+    rows = [
+        {
+            "code": r[0],
+            "description": r[1],
+            "full_path": r[2],
+            "duty_rate": r[3],
+            "data_source": r[4],
+        }
+        for r in cur.fetchall()
+    ]
     conn.close()
     return rows
 

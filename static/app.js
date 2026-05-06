@@ -304,6 +304,7 @@ function renderResultStep(data) {
                     <div class="alt-item">
                         <div class="alt-head">
                             <code>${escapeHtml(a.code || "—")}</code>
+                            ${dutyBadge(a.duty_rate)}
                             <span class="alt-path">${escapeHtml(a.full_path || "")}</span>
                         </div>
                         ${a.why_close ? `<div class="alt-row"><span class="alt-label">Близок:</span> ${escapeHtml(a.why_close)}</div>` : ""}
@@ -346,7 +347,10 @@ function renderResultStep(data) {
                 </div>
             </div>
 
-            <div class="result-code">${escapeHtml(primary.code || "—")}</div>
+            <div class="result-code-row">
+                <div class="result-code">${escapeHtml(primary.code || "—")}</div>
+                ${dutyBadge(primary.duty_rate, "large")}
+            </div>
 
             ${hierarchyHtml}
 
@@ -364,6 +368,12 @@ function renderResultStep(data) {
 
 
 // ─── utilities ────────────────────────────────────────────────────────────────
+
+function dutyBadge(rate, size) {
+    if (rate === null || rate === undefined || rate === "") return "";
+    const cls = size === "large" ? "duty-badge duty-badge-large" : "duty-badge";
+    return `<span class="${cls}" title="Импортная пошлина (TWS.BY)">Пошлина: ${escapeHtml(rate)}</span>`;
+}
 
 function escapeHtml(s) {
     const div = document.createElement("div");

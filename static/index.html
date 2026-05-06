@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ассистент по ТН ВЭД</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+</head>
+<body>
+    <div class="bg-decoration"></div>
+
+    <div class="container">
+        <header>
+            <div class="logo">
+                <span class="logo-icon">⚡</span>
+                <span class="logo-text">ТН ВЭД <span class="logo-dim">Ассистент</span></span>
+            </div>
+            <p class="subtitle">Профессиональный определитель кода Товарной номенклатуры ВЭД ЕАЭС</p>
+        </header>
+
+        <main>
+
+        <!-- ═══════════ ШАГ 1. ВВОД ═══════════ -->
+        <section id="step-input" class="step">
+            <div class="stepper">
+                <div class="stepper-item active"><span class="stepper-num">1</span> Описание</div>
+                <div class="stepper-line"></div>
+                <div class="stepper-item"><span class="stepper-num">2</span> Уточнения</div>
+                <div class="stepper-line"></div>
+                <div class="stepper-item"><span class="stepper-num">3</span> Результат</div>
+            </div>
+
+            <div class="card">
+                <div class="mode-toggle">
+                    <button class="mode-btn active" data-mode="simple">Простой</button>
+                    <button class="mode-btn" data-mode="detailed">Подробный</button>
+                </div>
+
+                <!-- Простой режим -->
+                <div class="mode-panel" id="mode-simple">
+                    <label for="description">Описание товара</label>
+                    <textarea id="description"
+                        placeholder="Например: хлопковая ткань суровая, плотность 150 г/м², ширина 150 см"
+                        rows="4"></textarea>
+                    <p class="hint">Опишите товар максимально полно. Система сама задаст уточняющие вопросы при необходимости.</p>
+                </div>
+
+                <!-- Подробный режим -->
+                <div class="mode-panel" id="mode-detailed" hidden>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="f-name">Полное наименование</label>
+                            <input id="f-name" type="text" placeholder="Например: трикотажное полотно">
+                        </div>
+
+                        <div class="field">
+                            <label for="f-purpose">Назначение / функция</label>
+                            <input id="f-purpose" type="text" placeholder="Например: пошив верхней одежды">
+                        </div>
+
+                        <div class="field full">
+                            <label for="f-material">Материал / состав</label>
+                            <input id="f-material" type="text" placeholder="Например: хлопок 80%, полиэстер 20%">
+                        </div>
+
+                        <div class="field">
+                            <label for="f-processing">Степень обработки</label>
+                            <select id="f-processing">
+                                <option value="">— не указано —</option>
+                                <option>сырьё</option>
+                                <option>полуфабрикат</option>
+                                <option>готовое изделие</option>
+                                <option>часть/компонент</option>
+                                <option>комплект</option>
+                            </select>
+                        </div>
+
+                        <div class="field">
+                            <label for="f-form">Форма поставки</label>
+                            <select id="f-form">
+                                <option value="">— не указано —</option>
+                                <option>отдельная единица</option>
+                                <option>в наборе</option>
+                                <option>разобранное</option>
+                                <option>навалом / насыпью</option>
+                                <option>в первичной упаковке</option>
+                            </select>
+                        </div>
+
+                        <div class="field">
+                            <label for="f-brand">Торговая марка / производитель</label>
+                            <input id="f-brand" type="text" placeholder="Опционально">
+                        </div>
+
+                        <div class="field">
+                            <label for="f-country">Страна происхождения</label>
+                            <input id="f-country" type="text" placeholder="Опционально">
+                        </div>
+
+                        <div class="field full">
+                            <label for="f-tech">Технические характеристики</label>
+                            <textarea id="f-tech" rows="3" placeholder="Вес, размеры, мощность, плотность, концентрация и т.п."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row row-spread">
+                    <div class="model-picker">
+                        <span class="model-picker-label">Модель</span>
+                        <select id="model-select" title="Модель Ollama">
+                            <option value="qwen2.5:14b" selected>qwen2.5:14b</option>
+                        </select>
+                    </div>
+                    <button id="start-btn" class="primary">
+                        <span>Определить код</span>
+                        <span class="kbd">⌘ ↵</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════ ШАГ 2. УТОЧНЕНИЯ ═══════════ -->
+        <section id="step-questions" class="step" hidden>
+            <div class="stepper">
+                <div class="stepper-item done"><span class="stepper-num">✓</span> Описание</div>
+                <div class="stepper-line done"></div>
+                <div class="stepper-item active"><span class="stepper-num">2</span> Уточнения</div>
+                <div class="stepper-line"></div>
+                <div class="stepper-item"><span class="stepper-num">3</span> Результат</div>
+            </div>
+
+            <div class="card">
+                <div id="triage-summary" class="triage-summary"></div>
+                <div id="questions-list"></div>
+                <div class="row row-spread">
+                    <button id="back-to-input" class="ghost">← Изменить описание</button>
+                    <button id="finalize-btn" class="primary">
+                        <span>Получить код</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════ ШАГ 3. РЕЗУЛЬТАТ ═══════════ -->
+        <section id="step-result" class="step" hidden>
+            <div class="stepper">
+                <div class="stepper-item done"><span class="stepper-num">✓</span> Описание</div>
+                <div class="stepper-line done"></div>
+                <div class="stepper-item done"><span class="stepper-num">✓</span> Уточнения</div>
+                <div class="stepper-line done"></div>
+                <div class="stepper-item active"><span class="stepper-num">3</span> Результат</div>
+            </div>
+
+            <div id="result-content"></div>
+
+            <div class="row" style="margin-top: 1.5rem; gap: 0.5rem;">
+                <button id="reset-btn" class="ghost">← Новый запрос</button>
+                <button id="copy-result-btn" class="primary">Скопировать код</button>
+            </div>
+        </section>
+
+        </main>
+
+        <footer>
+            <span id="status"></span>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

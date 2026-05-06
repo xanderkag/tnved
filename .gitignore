@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Data (большие файлы — генерируются скриптами)
+data/raw/*.csv
+data/raw/*.xml
+data/raw/*.xlsx
+data/tnved.db
+data/tnved.faiss
+data/tnved_meta.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Streamlit (legacy)
+.streamlit/

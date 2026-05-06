@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+*.pyo
+.Python
+.git/
+.gitignore
+.venv/
+venv/
+
+# секреты НЕ в образ
+.env
+.env.*
+!.env.example
+
+# локально-сгенерированные данные пересоберём внутри образа
+data/raw/
+data/tnved.db
+data/tnved.faiss
+data/tnved_meta.json
+.hf-cache/
+
+# legacy / dev
+.streamlit/
+*.log
+*.bak
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

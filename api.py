@@ -6,13 +6,13 @@ FastAPI-бэкенд: двухстадийный пайплайн классиф
 
 from __future__ import annotations
 
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import ollama
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,7 +23,7 @@ from tnved_data import TNVEDStore
 
 BASE = Path(__file__).parent
 STATIC_DIR = BASE / "static"
-DEFAULT_LLM = "qwen2.5:14b"
+DEFAULT_LLM = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
 # ─── глобальные ресурсы ───────────────────────────────────────────────────────
 
@@ -150,13 +150,7 @@ async def classify_get(session_id: str):
 
 @app.get("/api/models")
 async def models():
-    try:
-        client = ollama.AsyncClient()
-        result = await client.list()
-        names = [m.model for m in result.models]
-        return {"models": names, "default": DEFAULT_LLM}
-    except Exception as e:
-        return {"models": [DEFAULT_LLM], "default": DEFAULT_LLM, "error": str(e)}
+    return {"models": [DEFAULT_LLM], "default": DEFAULT_LLM}
 
 
 # ─── статика ──────────────────────────────────────────────────────────────────

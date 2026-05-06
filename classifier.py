@@ -4,18 +4,34 @@
 Stage 1 (triage): по описанию определяет вероятную группу + что не хватает.
 Stage 2 (classify): из кандидатов внутри группы выбирает финальный код + альтернативы.
 
-LLM возвращает строгий JSON (Ollama format='json').
+LLM возвращает строгий JSON (response_format={"type": "json_object"}).
+Бэкенд — любой OpenAI-совместимый endpoint (OpenAI, vLLM, Ollama в режиме
+/v1, внутренний шлюз и т.п.). Конфигурится через env: OPENAI_API_KEY,
+OPENAI_BASE_URL.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+import os
 
-import ollama
+from openai import AsyncOpenAI
 
 from gri import GRI_HINT_FOR_PROMPT, gri_text
 from tnved_data import TNVEDStore
+
+_client: AsyncOpenAI | None = None
+
+
+def get_client() -> AsyncOpenAI:
+    """Ленивый singleton AsyncOpenAI. Конфиг — из env."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
+            base_url=os.environ.get("OPENAI_BASE_URL") or None,
+        )
+    return _client
 
 # ─── промпты ──────────────────────────────────────────────────────────────────
 
@@ -104,18 +120,18 @@ def merge_qa(description: str, answers: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def _llm_json(client: ollama.AsyncClient, model: str, system: str, user: str) -> dict:
-    """Вызов Ollama с format='json' и парсинг ответа в dict."""
-    resp = await client.chat(
+async def _llm_json(client: AsyncOpenAI, model: str, system: str, user: str) -> dict:
+    """Вызов OpenAI-совместимого chat API с JSON-режимом и парсинг в dict."""
+    resp = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        format="json",
-        options={"temperature": 0.1},
+        response_format={"type": "json_object"},
+        temperature=0.1,
     )
-    raw = resp.get("message", {}).get("content", "{}")
+    raw = resp.choices[0].message.content or "{}"
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -135,7 +151,7 @@ async def triage(
     model: str,
 ) -> dict:
     """Определяет группу и набор уточняющих вопросов."""
-    client = ollama.AsyncClient()
+    client = get_client()
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"ДОСТУПНЫЕ ГРУППЫ ТН ВЭД:\n{store.groups_list_for_prompt()}"
@@ -185,7 +201,7 @@ async def classify(
     group_info = store.group_info(group_code)
     group_line = f"{group_info['code']} {group_info['description']}" if group_info else group_code
 
-    client = ollama.AsyncClient()
+    client = get_client()
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"ОПРЕДЕЛЁННАЯ ГРУППА: {group_line}\n\n"

@@ -1,0 +1,40 @@
+# Caddy → FastAPI. Caddy остаётся внутри compose как WS-страховка
+# (на этом приложении WS не используется, но правило skill — единый шаблон).
+
+services:
+  app:
+    build: .
+    image: ${COMPOSE_PROJECT_NAME:-tnved}:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-tnved}
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      TZ: Europe/Moscow
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-tnved}-caddy
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8082}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

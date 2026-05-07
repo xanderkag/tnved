@@ -478,40 +478,52 @@ function renderResultStep(data) {
         low: "низкая",
     }[primary.confidence] || "—";
 
+    // Краткое название = последний сегмент full_path (или из иерархии),
+    // нормализованное по регистру.
+    const shortName = niceText(
+        (primary.full_path || "").split("→").pop()?.trim()
+        || (primary.hierarchy && primary.hierarchy.length
+            ? primary.hierarchy[primary.hierarchy.length - 1].description
+            : "")
+    );
+
+    // Иерархия — компактная крошка с короткими описаниями (нормальным регистром).
     const hierarchyHtml = primary.hierarchy && primary.hierarchy.length
-        ? `<div class="hierarchy">
-            ${primary.hierarchy.map((h, i) => `
-                <span class="hier-item">
-                    <code>${escapeHtml(h.code)}</code>
-                    <span>${escapeHtml(h.description)}</span>
-                </span>
-                ${i < primary.hierarchy.length - 1 ? '<span class="hier-arrow">→</span>' : ''}
-            `).join("")}
-           </div>`
+        ? `<details class="result-section">
+            <summary>Иерархия · ${primary.hierarchy.length}</summary>
+            <div class="hierarchy hierarchy-stacked">
+                ${primary.hierarchy.map(h => `
+                    <div class="hier-row">
+                        <code>${escapeHtml(h.code)}</code>
+                        <span>${escapeHtml(niceText(h.description))}</span>
+                    </div>
+                `).join("")}
+            </div>
+           </details>`
         : "";
 
     const altsHtml = alternatives.length
-        ? `<div class="result-section">
-            <h3>Альтернативные коды</h3>
+        ? `<details class="result-section">
+            <summary>Альтернативы · ${alternatives.length}</summary>
             <div class="alternatives">
                 ${alternatives.map(a => `
                     <div class="alt-item">
                         <div class="alt-head">
                             <code>${escapeHtml(a.code || "—")}</code>
                             ${dutyBadge(a.duty_rate)}
-                            <span class="alt-path">${escapeHtml(a.full_path || "")}</span>
                         </div>
+                        <div class="alt-path">${escapeHtml(niceText(a.full_path || ""))}</div>
                         ${a.why_close ? `<div class="alt-row"><span class="alt-label">Близок:</span> ${escapeHtml(a.why_close)}</div>` : ""}
                         ${a.why_rejected ? `<div class="alt-row"><span class="alt-label">Отвергнут:</span> ${escapeHtml(a.why_rejected)}</div>` : ""}
                     </div>
                 `).join("")}
             </div>
-           </div>`
+           </details>`
         : "";
 
     const griHtml = griExplained.length
-        ? `<div class="result-section">
-            <h3>Применённые ОПИ</h3>
+        ? `<details class="result-section">
+            <summary>Применённые ОПИ · ${griExplained.length}</summary>
             <div class="gri-list">
                 ${griExplained.map(g => `
                     <div class="gri-item">
@@ -520,16 +532,16 @@ function renderResultStep(data) {
                     </div>
                 `).join("")}
             </div>
-           </div>`
+           </details>`
         : "";
 
     const checksHtml = checks.length
-        ? `<div class="result-section">
-            <h3>Что проверить вручную</h3>
+        ? `<details class="result-section">
+            <summary>Что проверить вручную · ${checks.length}</summary>
             <ul class="checks-list">
                 ${checks.map(c => `<li>${escapeHtml(c)}</li>`).join("")}
             </ul>
-           </div>`
+           </details>`
         : "";
 
     $("result-content").innerHTML = `
@@ -537,7 +549,7 @@ function renderResultStep(data) {
             <div class="result-head">
                 <div class="result-label">Код ТН ВЭД ЕАЭС</div>
                 <div class="result-confidence">
-                    ${confEmoji} Уверенность: <strong>${escapeHtml(confLabel)}</strong>
+                    ${confEmoji} <strong>${escapeHtml(confLabel)}</strong>
                 </div>
             </div>
 
@@ -546,15 +558,16 @@ function renderResultStep(data) {
                 ${dutyBadge(primary.duty_rate, "large")}
             </div>
 
-            ${hierarchyHtml}
+            ${shortName ? `<div class="result-shortname">${escapeHtml(shortName)}</div>` : ""}
 
-            <div class="result-reasoning">
-                <h3>Обоснование</h3>
+            <details class="result-section result-reasoning" open>
+                <summary>Обоснование</summary>
                 <p>${escapeHtml(primary.reasoning || "")}</p>
-            </div>
+            </details>
 
-            ${griHtml}
+            ${hierarchyHtml}
             ${altsHtml}
+            ${griHtml}
             ${checksHtml}
         </div>
     `;
@@ -795,6 +808,27 @@ function onBatchReset(opts = {}) {
 
 
 // ─── utilities ────────────────────────────────────────────────────────────────
+
+/**
+ * Описания в SQLite-источнике лежат CAPSом (наследие 2017-выгрузки ФТС).
+ * В UI это шумит — нормализуем: первая буква большая, остальное маленькое.
+ * Сохраняем разделители ' → ' между сегментами full_path.
+ */
+function niceText(s) {
+    if (!s) return "";
+    const sentenceCase = (chunk) => {
+        const trimmed = chunk.trim();
+        if (!trimmed) return chunk;
+        // Если в чанке есть и большие и маленькие — оставляем как есть (уже нормально).
+        const allUpper = trimmed === trimmed.toUpperCase() && /[А-ЯA-Z]/.test(trimmed);
+        if (!allUpper) return chunk;
+        // Сделать «Sentence case»: первая буква большая, остальные маленькие.
+        const lower = trimmed.toLowerCase();
+        return lower.charAt(0).toUpperCase() + lower.slice(1);
+    };
+    return s.split("→").map(sentenceCase).join(" → ");
+}
+
 
 function dutyBadge(rate, size) {
     if (rate === null || rate === undefined || rate === "") return "";

@@ -1156,9 +1156,51 @@ footer {
 }
 
 .result-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
+    margin-top: 1rem;
+    padding-top: 1rem;
     border-top: 1px solid var(--border);
+}
+
+/* details/summary стилизация — мы превратили все разделы в свернутые блоки */
+details.result-section {
+    padding: 0;
+    border-top: 1px solid var(--border);
+    margin-top: 0;
+}
+
+details.result-section > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 0.875rem 0 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    user-select: none;
+    transition: color 120ms;
+}
+
+details.result-section > summary::-webkit-details-marker { display: none; }
+
+details.result-section > summary::before {
+    content: "▸ ";
+    display: inline-block;
+    transition: transform 120ms;
+    margin-right: 0.25rem;
+    color: var(--text-dim);
+}
+
+details.result-section[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+details.result-section > summary:hover {
+    color: var(--text);
+}
+
+details.result-section > *:not(summary) {
+    margin-top: 0.5rem;
+    padding-bottom: 1rem;
 }
 
 .result-section h3 {
@@ -1173,6 +1215,41 @@ footer {
 .result-reasoning p {
     color: var(--text);
     line-height: 1.65;
+    margin: 0;
+}
+
+/* Сводка: краткое название кода (один листовой сегмент в нормальном регистре) */
+.result-shortname {
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.4;
+    margin: -0.5rem 0 1rem;
+}
+
+/* Иерархия в стек, по строке на уровень */
+.hierarchy-stacked {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.hier-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.625rem;
+    font-size: 0.875rem;
+    color: var(--text);
+    line-height: 1.4;
+}
+
+.hier-row > code {
+    flex-shrink: 0;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
 }
 
 /* GRI list */

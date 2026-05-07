@@ -3,7 +3,10 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        LITE_MODE: ${LITE_MODE:-0}
     image: ${COMPOSE_PROJECT_NAME:-tnved}:latest
     container_name: ${COMPOSE_PROJECT_NAME:-tnved}
     restart: unless-stopped
@@ -11,6 +14,7 @@ services:
       - "8000"
     environment:
       TZ: Europe/Moscow
+      LITE_MODE: ${LITE_MODE:-0}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}

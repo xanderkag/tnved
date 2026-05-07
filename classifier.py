@@ -250,8 +250,8 @@ async def classify(
     top_k: int = 12,
 ) -> dict:
     """Финальная классификация: ищем кандидатов в группе, LLM выбирает код."""
-    # store.search — sync, тяжёлый CPU (sentence-transformers + FAISS).
-    # Уносим в thread-pool, чтобы не блокировать event loop.
+    # В lite-режиме store игнорирует top_k и отдаёт LITE_TOP_K листьев группы;
+    # в полном режиме это векторный поиск (CPU-bound, поэтому в to_thread).
     candidates = await asyncio.to_thread(
         store.search, description, top_k=top_k, group_code=group_code
     )

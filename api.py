@@ -96,7 +96,8 @@ async def lifespan(app: FastAPI):
     print("Загружаем ресурсы ТН ВЭД...")
     try:
         state.store = TNVEDStore()
-        print(f"Готово. Векторов: {state.store.index.ntotal:,}, групп: {len(state.store.groups)}")
+        mode = "LITE (SQLite-only)" if state.store.lite else "FULL (FAISS)"
+        print(f"Готово [{mode}]. Кодов в индексе: {state.store.index_ntotal:,}, групп: {len(state.store.groups)}")
     except Exception as e:  # noqa: BLE001 — переходим в degraded-режим вместо краха
         print(f"[lifespan] FATAL: не смог загрузить TNVEDStore: {e}")
         print("[lifespan] сервер поднят в degraded-режиме: classify-эндпоинты будут отдавать 503")
@@ -289,7 +290,8 @@ async def health():
         raise HTTPException(503, "store not loaded")
     return {
         "status": "ok",
-        "vectors": int(state.store.index.ntotal),
+        "mode": "lite" if state.store.lite else "full",
+        "vectors": state.store.index_ntotal,
         "groups": len(state.store.groups),
         "static_version": STATIC_VER,
     }

@@ -39,3 +39,4 @@ Thumbs.db
 demo_input.xlsx
 static/demo_input.xlsx
 .claude/
+build_log.txt

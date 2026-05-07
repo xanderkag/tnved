@@ -12,12 +12,13 @@ venv/
 .env.*
 !.env.example
 
-# локально-сгенерированные данные пересоберём внутри образа
+# raw-источники (CSV+xlsx) не нужны в образе — данные уже в SQLite/FAISS
 data/raw/
-data/tnved.db
-data/tnved.faiss
-data/tnved_meta.json
 .hf-cache/
+
+# !! ВАЖНО: data/tnved.db, data/tnved.faiss, data/tnved_meta.json
+# теперь ИДУТ В ОБРАЗ — собраны локально и копируются через build context.
+# Если их нет — Dockerfile переключается на fallback (медленный) build_index.
 
 # демо-сервер и фикстуры — только локально для превью без LLM
 demo_server.py

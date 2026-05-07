@@ -17,15 +17,22 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# Сборка данных и FAISS-индекса в момент билда:
-#   1) fetch_tnved.py — качает CSV из GitHub infoculture/opencustoms
-#   2) parse_tnved.py — конвертирует в SQLite
-#   3) build_index.py — считает эмбеддинги и пишет FAISS + meta.json
-# Параллельно тянется HF-модель intfloat/multilingual-e5-base в HF_HOME,
-# она же используется при рантайме (поиск кандидатов).
-RUN python fetch_tnved.py \
-    && python parse_tnved.py \
-    && python build_index.py
+# Данные и FAISS-индекс ожидаются ГОТОВЫЕ в data/ (через build context).
+# Если их нет — пытаемся собрать (fallback на старое поведение). На слабых
+# виртуалках без KVM build_index.py может занимать час+, поэтому штатно
+# собираем локально и кладём в репозиторий рабочей копии перед docker build.
+RUN if [ ! -f data/tnved.faiss ] || [ ! -f data/tnved_meta.json ] || [ ! -f data/tnved.db ]; then \
+        echo "data/ пуста — собираю с нуля (это медленно на слабом CPU)" \
+        && python fetch_tnved.py \
+        && python parse_tnved.py \
+        && python build_index.py ; \
+    else \
+        echo "data/ уже собрана, пропускаю fetch+parse+build_index" ; \
+    fi
+
+# В рантайме classifier ходит в HF за моделью эмбеддера. Чтобы избежать
+# повторной выкачки на каждом старте контейнера — прогреваем HF-кэш в образе.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-base')"
 
 EXPOSE 8000
 

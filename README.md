@@ -13,7 +13,7 @@
   - **Чат** — свободный диалог с авто-финализацией.
 - **Свежие коды + пошлины** — слияние [infoculture/opencustoms](https://github.com/infoculture/opencustoms) (иерархия) + [TWS.BY](https://www.tws.by/tws/tnved/download/excel) (актуальные листья + ставка пошлины, обновляется ежедневно). 31 622 кода в SQLite, 13 285 со ставкой.
 - **Векторный поиск** через `intfloat/multilingual-e5-base` + FAISS, фильтрация по группе.
-- **Любой OpenAI-совместимый бэкенд** (OpenAI, vLLM, внутренний шлюз) — `OPENAI_BASE_URL` и `LLM_MODEL` через env.
+- **Два провайдера LLM из коробки**: OpenAI и Anthropic (Claude). Конфиг — через шестерёнку в шапке UI (хранится в localStorage и шлётся заголовками `X-LLM-*` per-request) либо через env как fallback.
 - **JSON-режим LLM** для стабильного парсинга.
 
 ## Структура
@@ -72,13 +72,20 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 
 Возвращает захардкоженные ответы на тех же эндпоинтах. Полезно для верстки/демонстрации, но **классификация не работает** (всё отдаёт посудомойку 8422110000).
 
-## Конфигурация (env)
+## Конфигурация LLM
+
+**Два пути:**
+
+1. **UI (приоритет):** шестерёнка ⚙ в шапке → выбор провайдера, модели, ввод ключа (и опционально base URL для OpenAI). Сохраняется в `localStorage` и подмешивается заголовками `X-LLM-Provider` / `X-LLM-API-Key` / `X-LLM-Model` / `X-LLM-Base-URL` в каждый запрос. Сервер ничего не сохраняет.
+2. **Env (fallback):** если в заголовках поля пусты, классификатор подтягивает их из env (см. таблицу ниже). Удобно для дев-стенда / Docker-демо без UI-настройки.
 
 | Переменная | Дефолт | Что |
 |---|---|---|
-| `OPENAI_API_KEY` | — | обязательна (для Ollama-совместимых можно `EMPTY`) |
+| `LLM_PROVIDER` | `openai` | `openai` или `anthropic` |
+| `OPENAI_API_KEY` | — | для OpenAI / OpenAI-совместимых |
+| `ANTHROPIC_API_KEY` | — | для Anthropic |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | внутренний vLLM/шлюз — указать сюда |
-| `LLM_MODEL` | `gpt-4o-mini` | имя модели у провайдера |
+| `LLM_MODEL` | `gpt-4o-mini` (или `claude-haiku-4-5` для Anthropic) | имя модели |
 | `LLM_TIMEOUT` | `60` | сек, верхний таймаут на LLM-вызов |
 | `BATCH_CONCURRENCY` | `5` | параллельных LLM-запросов в одном батче |
 | `BATCH_MAX_ROWS` | `500` | максимум строк в xlsx |

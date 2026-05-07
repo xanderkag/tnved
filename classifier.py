@@ -4,10 +4,10 @@
 Stage 1 (triage): по описанию определяет вероятную группу + что не хватает.
 Stage 2 (classify): из кандидатов внутри группы выбирает финальный код + альтернативы.
 
-LLM возвращает строгий JSON (response_format={"type": "json_object"}).
-Бэкенд — любой OpenAI-совместимый endpoint (OpenAI, vLLM, Ollama в режиме
-/v1, внутренний шлюз и т.п.). Конфигурится через env: OPENAI_API_KEY,
-OPENAI_BASE_URL.
+LLM возвращает строгий JSON (OpenAI: response_format=json_object;
+Anthropic: эмулируется через системный промпт + parse). Конфиг приходит
+per-request из заголовков X-LLM-* (см. api.py), либо подтягивается из env
+как fallback.
 """
 
 from __future__ import annotations
@@ -15,25 +15,110 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from typing import Literal, Optional
 
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 
 from gri import GRI_HINT_FOR_PROMPT, gri_text
 from tnved_data import TNVEDStore
 
-_client: AsyncOpenAI | None = None
+
+# ─── конфиг LLM ───────────────────────────────────────────────────────────────
+
+class LLMConfig(BaseModel):
+    """Конфигурация LLM-провайдера. Приходит из UI (заголовки X-LLM-*) или env."""
+    provider: Literal["openai", "anthropic"] = "openai"
+    api_key: str = ""
+    base_url: Optional[str] = None
+    model: str = ""
 
 
-def get_client() -> AsyncOpenAI:
-    """Ленивый singleton AsyncOpenAI. Конфиг — из env."""
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(
-            api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-            timeout=float(os.environ.get("LLM_TIMEOUT", "60")),
+_DEFAULT_MODEL_BY_PROVIDER = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5",
+}
+
+
+def resolve_config(cfg: Optional[LLMConfig]) -> LLMConfig:
+    """Заполняет пустые поля cfg из env. Используем как fallback в любом эндпоинте."""
+    if cfg is None:
+        cfg = LLMConfig()
+
+    provider = cfg.provider or "openai"
+    api_key = cfg.api_key or os.environ.get(
+        "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY",
+        "",
+    )
+    base_url = cfg.base_url or (os.environ.get("OPENAI_BASE_URL") if provider == "openai" else None)
+    model = cfg.model or os.environ.get("LLM_MODEL", _DEFAULT_MODEL_BY_PROVIDER[provider])
+
+    return LLMConfig(provider=provider, api_key=api_key, base_url=base_url or None, model=model)
+
+
+# ─── вызовы провайдеров ───────────────────────────────────────────────────────
+
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
+
+
+async def _call_openai_json(cfg: LLMConfig, system: str, user: str) -> dict:
+    """OpenAI / OpenAI-совместимый: используем нативный response_format=json_object."""
+    client = AsyncOpenAI(
+        api_key=cfg.api_key or "EMPTY",
+        base_url=cfg.base_url,
+        timeout=LLM_TIMEOUT,
+    )
+    resp = await client.chat.completions.create(
+        model=cfg.model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+    )
+    raw = resp.choices[0].message.content or "{}"
+    return _parse_json_loose(raw)
+
+
+async def _call_anthropic_json(cfg: LLMConfig, system: str, user: str) -> dict:
+    """Anthropic: нет нативного JSON-mode → жёстко требуем формат в system."""
+    client = AsyncAnthropic(api_key=cfg.api_key, timeout=LLM_TIMEOUT)
+    sys = system + "\n\nВАЖНО: верни ТОЛЬКО валидный JSON-объект, без markdown-обрамления, без преамбулы и пояснений."
+    resp = await client.messages.create(
+        model=cfg.model,
+        max_tokens=2048,
+        system=sys,
+        messages=[{"role": "user", "content": user}],
+        temperature=0.1,
+    )
+    raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    return _parse_json_loose(raw)
+
+
+def _parse_json_loose(raw: str) -> dict:
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(raw[start:end + 1])
+        raise
+
+
+async def llm_json(cfg: Optional[LLMConfig], system: str, user: str) -> dict:
+    cfg = resolve_config(cfg)
+    if not cfg.api_key:
+        raise ValueError(
+            "LLM API-ключ не задан. Открой шестерёнку справа сверху и введи ключ "
+            "(OpenAI или Anthropic), либо задай env OPENAI_API_KEY / ANTHROPIC_API_KEY."
         )
-    return _client
+    if cfg.provider == "anthropic":
+        return await _call_anthropic_json(cfg, system, user)
+    return await _call_openai_json(cfg, system, user)
 
 # ─── промпты ──────────────────────────────────────────────────────────────────
 
@@ -122,43 +207,19 @@ def merge_qa(description: str, answers: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def _llm_json(client: AsyncOpenAI, model: str, system: str, user: str) -> dict:
-    """Вызов OpenAI-совместимого chat API с JSON-режимом и парсинг в dict."""
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-    raw = resp.choices[0].message.content or "{}"
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # последняя попытка — найти JSON в тексте
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(raw[start:end + 1])
-        raise
-
-
 # ─── stage 1 — triage ────────────────────────────────────────────────────────
 
 async def triage(
     store: TNVEDStore,
     description: str,
-    model: str,
+    cfg: Optional[LLMConfig] = None,
 ) -> dict:
     """Определяет группу и набор уточняющих вопросов."""
-    client = get_client()
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"ДОСТУПНЫЕ ГРУППЫ ТН ВЭД:\n{store.groups_list_for_prompt()}"
     )
-    result = await _llm_json(client, model, TRIAGE_SYSTEM, user)
+    result = await llm_json(cfg, TRIAGE_SYSTEM, user)
 
     # Валидация и обогащение
     group_code = str(result.get("group_code", "")).strip()
@@ -185,7 +246,7 @@ async def classify(
     store: TNVEDStore,
     description: str,
     group_code: str,
-    model: str,
+    cfg: Optional[LLMConfig] = None,
     top_k: int = 12,
 ) -> dict:
     """Финальная классификация: ищем кандидатов в группе, LLM выбирает код."""
@@ -207,14 +268,13 @@ async def classify(
     group_info = store.group_info(group_code)
     group_line = f"{group_info['code']} {group_info['description']}" if group_info else group_code
 
-    client = get_client()
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"ОПРЕДЕЛЁННАЯ ГРУППА: {group_line}\n\n"
         f"КАНДИДАТЫ:\n{candidates_text}\n\n"
         f"{GRI_HINT_FOR_PROMPT}"
     )
-    result = await _llm_json(client, model, CLASSIFY_SYSTEM, user)
+    result = await llm_json(cfg, CLASSIFY_SYSTEM, user)
 
     # Валидация
     primary = result.get("primary") or {}

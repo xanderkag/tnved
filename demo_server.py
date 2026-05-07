@@ -85,18 +85,31 @@ class StartRequest(BaseModel):
     mode: str = "simple"
     description: str | None = None
     fields: dict | None = None
-    model: str = "demo-model"
 
 
 class FinalizeRequest(BaseModel):
     session_id: str
     answers: list = []
-    model: str = "demo-model"
 
 
 @app.get("/api/models")
 async def models():
-    return {"models": ["demo-model"], "default": "demo-model"}
+    """Демо-сервер делает вид, что поддерживает оба провайдера. UI покажет переключение."""
+    return {
+        "default": {"provider": "openai", "model": "demo-model"},
+        "providers": {
+            "openai": {
+                "label": "OpenAI",
+                "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
+                "needs_base_url": True,
+            },
+            "anthropic": {
+                "label": "Anthropic",
+                "models": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"],
+                "needs_base_url": False,
+            },
+        },
+    }
 
 
 @app.post("/api/classify/start")
@@ -109,7 +122,7 @@ async def classify_start(req: StartRequest):
         raise HTTPException(400, "Пустое описание")
     sid = uuid.uuid4().hex[:12]
     sessions[sid] = {
-        "id": sid, "description": desc, "model": req.model,
+        "id": sid, "description": desc,
         "created_at": datetime.utcnow().isoformat(),
         "triage": {"group_code": SAMPLE_GROUP["code"], "group_name": SAMPLE_GROUP["name"],
                    "completeness": "low", "missing_aspects": ["назначение", "тех. параметры"],
@@ -151,7 +164,7 @@ async def classify_get(session_id: str):
 # ─── batch ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/classify/batch")
-async def classify_batch_start(file: UploadFile = File(...), model: str = Form("demo-model")):
+async def classify_batch_start(file: UploadFile = File(...)):
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(400, "Ожидается .xlsx")
     content = await file.read()
@@ -236,12 +249,10 @@ async def classify_batch_download(job_id: str):
 
 class ChatStartRequest(BaseModel):
     initial_description: str = ""
-    model: str = "demo-model"
 
 
 class ChatMessageRequest(BaseModel):
     text: str
-    model: str = "demo-model"
 
 
 def _bot_question_msg(turn: int) -> str:

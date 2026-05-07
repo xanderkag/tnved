@@ -16,18 +16,19 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
 
-from classifier import classify, merge_qa, normalize_input, triage
+from classifier import LLMConfig, classify, merge_qa, normalize_input, resolve_config, triage
 from tnved_data import TNVEDStore
 
 BASE = Path(__file__).parent
 STATIC_DIR = BASE / "static"
 DEFAULT_LLM = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+DEFAULT_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "5"))
 BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
 CHAT_MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "6"))
@@ -128,7 +129,6 @@ class StartRequest(BaseModel):
     mode: str = Field("simple", pattern="^(simple|detailed)$")
     description: Optional[str] = None
     fields: Optional[dict] = None
-    model: str = DEFAULT_LLM
 
 
 class AnswerItem(BaseModel):
@@ -140,19 +140,35 @@ class AnswerItem(BaseModel):
 class FinalizeRequest(BaseModel):
     session_id: str
     answers: list[AnswerItem] = []
-    model: str = DEFAULT_LLM
 
 
-class SkipRequest(BaseModel):
-    session_id: str
-    model: str = DEFAULT_LLM
+def _llm_from_headers(
+    provider: Optional[str],
+    api_key: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+) -> LLMConfig:
+    """Собирает LLMConfig из заголовков X-LLM-*. Пустые поля заполнит resolve_config из env."""
+    return LLMConfig(
+        provider=(provider or "openai"),
+        api_key=(api_key or ""),
+        base_url=(base_url or None),
+        model=(model or ""),
+    )
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.post("/api/classify/start")
-async def classify_start(req: StartRequest):
+async def classify_start(
+    req: StartRequest,
+    x_llm_provider: Optional[str] = Header(None),
+    x_llm_api_key: Optional[str] = Header(None),
+    x_llm_model: Optional[str] = Header(None),
+    x_llm_base_url: Optional[str] = Header(None),
+):
     store = _require_store()
+    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
     description = normalize_input(req.description, req.fields)
     if not description:
         raise HTTPException(400, "Пустое описание товара")
@@ -162,7 +178,7 @@ async def classify_start(req: StartRequest):
             f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)",
         )
 
-    triage_result = await triage(store, description, req.model)
+    triage_result = await triage(store, description, cfg)
 
     session_id = uuid.uuid4().hex[:12]
     state.sessions[session_id] = {
@@ -170,7 +186,8 @@ async def classify_start(req: StartRequest):
         "created_at": datetime.utcnow().isoformat(),
         "mode": req.mode,
         "description": description,
-        "model": req.model,
+        "llm_provider": cfg.provider,
+        "llm_model": cfg.model,
         "triage": triage_result,
     }
 
@@ -188,8 +205,15 @@ async def classify_start(req: StartRequest):
 
 
 @app.post("/api/classify/finalize")
-async def classify_finalize(req: FinalizeRequest):
+async def classify_finalize(
+    req: FinalizeRequest,
+    x_llm_provider: Optional[str] = Header(None),
+    x_llm_api_key: Optional[str] = Header(None),
+    x_llm_model: Optional[str] = Header(None),
+    x_llm_base_url: Optional[str] = Header(None),
+):
     store = _require_store()
+    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
     session = state.sessions.get(req.session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
@@ -204,7 +228,7 @@ async def classify_finalize(req: FinalizeRequest):
         store,
         description=description,
         group_code=group_code,
-        model=req.model,
+        cfg=cfg,
     )
 
     session["answers"] = [a.model_dump() for a in req.answers]
@@ -233,7 +257,29 @@ async def classify_get(session_id: str):
 
 @app.get("/api/models")
 async def models():
-    return {"models": [DEFAULT_LLM], "default": DEFAULT_LLM}
+    """
+    Подсказки для UI настроек: имена моделей по каждому провайдеру + дефолт из env.
+    Реальная модель — что юзер выберет в шестерёнке (UI) или что лежит в env как fallback.
+    """
+    return {
+        "default": {"provider": DEFAULT_PROVIDER, "model": DEFAULT_LLM},
+        "providers": {
+            "openai": {
+                "label": "OpenAI",
+                "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+                "needs_base_url": True,
+            },
+            "anthropic": {
+                "label": "Anthropic",
+                "models": [
+                    "claude-haiku-4-5",
+                    "claude-sonnet-4-6",
+                    "claude-opus-4-7",
+                ],
+                "needs_base_url": False,
+            },
+        },
+    }
 
 
 @app.get("/health")
@@ -253,12 +299,10 @@ async def health():
 
 class ChatStartRequest(BaseModel):
     initial_description: str = ""
-    model: str = DEFAULT_LLM
 
 
 class ChatMessageRequest(BaseModel):
     text: str
-    model: str = DEFAULT_LLM
 
 
 def _chat_format_finalization(triage_res: dict, classify_res: dict) -> str:
@@ -317,13 +361,13 @@ def _chat_format_questions(triage_res: dict) -> str:
     return "\n".join(lines)
 
 
-async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
+async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
     store = _require_store()
     chat = state.chats[chat_id]
     chat["messages"].append({"role": "user", "content": text})
     chat["description"] = (chat["description"] + "\n" + text).strip() if chat["description"] else text
 
-    triage_res = await triage(store, chat["description"], model)
+    triage_res = await triage(store, chat["description"], cfg)
 
     user_turns = sum(1 for m in chat["messages"] if m["role"] == "user")
     completeness = triage_res.get("completeness", "low")
@@ -340,7 +384,7 @@ async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
             store,
             description=chat["description"],
             group_code=triage_res.get("group_code", ""),
-            model=model,
+            cfg=cfg,
         )
         chat["triage"] = triage_res
         chat["result"] = result
@@ -365,7 +409,14 @@ async def _chat_handle_user(chat_id: str, text: str, model: str) -> dict:
 
 
 @app.post("/api/chat/start")
-async def chat_start(req: ChatStartRequest):
+async def chat_start(
+    req: ChatStartRequest,
+    x_llm_provider: Optional[str] = Header(None),
+    x_llm_api_key: Optional[str] = Header(None),
+    x_llm_model: Optional[str] = Header(None),
+    x_llm_base_url: Optional[str] = Header(None),
+):
+    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
     chat_id = uuid.uuid4().hex[:12]
     state.chats[chat_id] = {
         "id": chat_id,
@@ -373,14 +424,15 @@ async def chat_start(req: ChatStartRequest):
         "messages": [],
         "description": "",
         "phase": "gathering",
-        "model": req.model,
+        "llm_provider": cfg.provider,
+        "llm_model": cfg.model,
         "triage": None,
         "result": None,
     }
 
     initial = req.initial_description.strip()
     if initial:
-        return await _chat_handle_user(chat_id, initial, req.model)
+        return await _chat_handle_user(chat_id, initial, cfg)
 
     state.chats[chat_id]["messages"].append({
         "role": "assistant",
@@ -395,7 +447,15 @@ async def chat_start(req: ChatStartRequest):
 
 
 @app.post("/api/chat/{chat_id}/message")
-async def chat_message(chat_id: str, req: ChatMessageRequest):
+async def chat_message(
+    chat_id: str,
+    req: ChatMessageRequest,
+    x_llm_provider: Optional[str] = Header(None),
+    x_llm_api_key: Optional[str] = Header(None),
+    x_llm_model: Optional[str] = Header(None),
+    x_llm_base_url: Optional[str] = Header(None),
+):
+    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
     chat = state.chats.get(chat_id)
     if not chat:
         raise HTTPException(404, "Чат не найден")
@@ -406,7 +466,7 @@ async def chat_message(chat_id: str, req: ChatMessageRequest):
             400,
             f"Сообщение слишком длинное ({len(req.text)} > {MAX_DESCRIPTION_LEN} символов)",
         )
-    return await _chat_handle_user(chat_id, req.text, req.model)
+    return await _chat_handle_user(chat_id, req.text, cfg)
 
 
 @app.get("/api/chat/{chat_id}")
@@ -449,12 +509,12 @@ def _detect_descriptions(rows: list[tuple]) -> list[str]:
     return out
 
 
-async def _classify_one_for_batch(description: str, model: str) -> dict:
+async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
     """В батче пропускаем уточнения: триаж → классификация на исходном описании."""
     store = _require_store()
-    triage_result = await triage(store, description, model)
+    triage_result = await triage(store, description, cfg)
     group_code = triage_result.get("group_code", "")
-    result = await classify(store, description, group_code, model)
+    result = await classify(store, description, group_code, cfg=cfg)
     return {
         "group_code": group_code,
         "group_name": triage_result.get("group_name", ""),
@@ -463,14 +523,14 @@ async def _classify_one_for_batch(description: str, model: str) -> dict:
     }
 
 
-async def _run_batch(job_id: str, descriptions: list[str], model: str) -> None:
+async def _run_batch(job_id: str, descriptions: list[str], cfg: LLMConfig) -> None:
     job = state.batch_jobs[job_id]
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
     async def worker(idx: int, desc: str) -> None:
         async with sem:
             try:
-                row = await _classify_one_for_batch(desc, model)
+                row = await _classify_one_for_batch(desc, cfg)
                 row["description"] = desc
                 job["results"][idx] = row
             except Exception as e:
@@ -492,9 +552,13 @@ async def _run_batch(job_id: str, descriptions: list[str], model: str) -> None:
 @app.post("/api/classify/batch")
 async def classify_batch_start(
     file: UploadFile = File(...),
-    model: str = Form(DEFAULT_LLM),
+    x_llm_provider: Optional[str] = Header(None),
+    x_llm_api_key: Optional[str] = Header(None),
+    x_llm_model: Optional[str] = Header(None),
+    x_llm_base_url: Optional[str] = Header(None),
 ):
     _require_store()
+    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
     fname = (file.filename or "").lower()
     if not fname.endswith(".xlsx"):
         raise HTTPException(400, "Ожидается .xlsx (Excel)")
@@ -514,6 +578,7 @@ async def classify_batch_start(
     if len(descriptions) > BATCH_MAX_ROWS:
         raise HTTPException(400, f"Слишком много строк: {len(descriptions)} > лимит {BATCH_MAX_ROWS}")
 
+    resolved_cfg = resolve_config(cfg)
     job_id = uuid.uuid4().hex[:12]
     state.batch_jobs[job_id] = {
         "id": job_id,
@@ -523,12 +588,13 @@ async def classify_batch_start(
         "status": "running",
         "started_at": datetime.utcnow().isoformat(),
         "finished_at": None,
-        "model": model,
+        "llm_provider": resolved_cfg.provider,
+        "llm_model": resolved_cfg.model,
         "results": [None] * len(descriptions),
         "errors": [],
     }
 
-    asyncio.create_task(_run_batch(job_id, descriptions, model))
+    asyncio.create_task(_run_batch(job_id, descriptions, cfg))
 
     return {"job_id": job_id, "total": len(descriptions), "status": "running"}
 

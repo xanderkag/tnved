@@ -12,10 +12,154 @@ const state = {
     result: null,
 };
 
+// ─── settings (LLM) ──────────────────────────────────────────────────────────
+
+const SETTINGS_KEY = "tnved.llm";
+const DEFAULT_SETTINGS = { provider: "openai", apiKey: "", model: "gpt-4o-mini", baseUrl: "" };
+
+let settings = { ...DEFAULT_SETTINGS };
+let providersInfo = null;   // populated by loadProviders()
+
+
+function loadSettings() {
+    try {
+        const raw = localStorage.getItem(SETTINGS_KEY);
+        if (raw) settings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    } catch {}
+}
+
+
+function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+
+function llmHeaders() {
+    return {
+        "X-LLM-Provider": settings.provider || "openai",
+        "X-LLM-API-Key": settings.apiKey || "",
+        "X-LLM-Model": settings.model || "",
+        "X-LLM-Base-URL": settings.baseUrl || "",
+    };
+}
+
+
+function apiFetch(url, opts = {}) {
+    const headers = { ...(opts.headers || {}), ...llmHeaders() };
+    return fetch(url, { ...opts, headers });
+}
+
+
+function refreshModelBadge() {
+    const label = $("model-name");
+    if (!label) return;
+    if (!settings.apiKey) {
+        label.textContent = "не настроено";
+        label.classList.add("model-name-warn");
+    } else {
+        const prov = settings.provider === "anthropic" ? "Anthropic" : "OpenAI";
+        label.textContent = `${prov}: ${settings.model || "—"}`;
+        label.classList.remove("model-name-warn");
+    }
+}
+
+
+function populateModelSelect() {
+    const sel = $("settings-model");
+    if (!sel || !providersInfo) return;
+    const provInfo = providersInfo.providers[settings.provider];
+    sel.innerHTML = "";
+    if (!provInfo) return;
+    for (const m of provInfo.models) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        if (m === settings.model) opt.selected = true;
+        sel.appendChild(opt);
+    }
+    // если текущая модель не в списке — добавим как отдельный пункт
+    if (settings.model && !provInfo.models.includes(settings.model)) {
+        const opt = document.createElement("option");
+        opt.value = settings.model;
+        opt.textContent = `${settings.model} (свой)`;
+        opt.selected = true;
+        sel.appendChild(opt);
+    }
+    // base_url показываем только когда провайдер его поддерживает
+    const showBaseUrl = provInfo.needs_base_url;
+    $("settings-base-url-field").hidden = !showBaseUrl;
+}
+
+
+function openSettings() {
+    if (!providersInfo) {
+        // если модели ещё не подгружены — попробуем перетащить и продолжим
+        loadProviders().then(openSettings);
+        return;
+    }
+    $("settings-provider").value = settings.provider;
+    $("settings-api-key").value = settings.apiKey;
+    $("settings-base-url").value = settings.baseUrl;
+    populateModelSelect();
+    $("settings-modal").hidden = false;
+}
+
+
+function closeSettings() {
+    $("settings-modal").hidden = true;
+}
+
+
+function onSettingsProviderChange() {
+    settings.provider = $("settings-provider").value;
+    // подобрать дефолтную модель для нового провайдера
+    const provInfo = providersInfo?.providers[settings.provider];
+    if (provInfo && !provInfo.models.includes(settings.model)) {
+        settings.model = provInfo.models[0] || "";
+    }
+    populateModelSelect();
+}
+
+
+function onSettingsSave() {
+    settings.provider = $("settings-provider").value;
+    settings.model = $("settings-model").value;
+    settings.apiKey = $("settings-api-key").value.trim();
+    settings.baseUrl = $("settings-base-url").value.trim();
+    saveSettings();
+    refreshModelBadge();
+    closeSettings();
+}
+
+
+function onSettingsClear() {
+    if (!confirm("Удалить сохранённый ключ и настройки?")) return;
+    settings = { ...DEFAULT_SETTINGS };
+    if (providersInfo?.default) {
+        settings.provider = providersInfo.default.provider || "openai";
+        settings.model = providersInfo.default.model || settings.model;
+    }
+    localStorage.removeItem(SETTINGS_KEY);
+    refreshModelBadge();
+    openSettings(); // перерисовать форму
+}
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
-    loadModels();
+    loadSettings();
+    loadProviders();
+    refreshModelBadge();
+
+    // Settings modal
+    $("settings-btn").addEventListener("click", openSettings);
+    $("settings-save-btn").addEventListener("click", onSettingsSave);
+    $("settings-clear-btn").addEventListener("click", onSettingsClear);
+    $("settings-provider").addEventListener("change", onSettingsProviderChange);
+    qsa("[data-close]").forEach(el => el.addEventListener("click", closeSettings));
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !$("settings-modal").hidden) closeSettings();
+    });
 
     // Top-level tabs (single / batch / chat)
     qsa(".top-tab").forEach(btn => {
@@ -70,23 +214,16 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 
-async function loadModels() {
+async function loadProviders() {
     try {
         const r = await fetch("/api/models");
-        const data = await r.json();
-        const sel = $("model-select");
-        sel.innerHTML = "";
-        for (const m of data.models) {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m;
-            if (m === data.default) opt.selected = true;
-            sel.appendChild(opt);
+        providersInfo = await r.json();
+        // Если у юзера нет ключа и пусто в settings.model — взять дефолт сервера
+        if (!settings.apiKey && providersInfo.default) {
+            if (!settings.model) settings.model = providersInfo.default.model || settings.model;
         }
-        const label = $("model-name");
-        if (label) label.textContent = data.default || "—";
     } catch (e) {
-        console.warn("Не удалось загрузить список моделей:", e);
+        console.warn("Не удалось загрузить /api/models:", e);
     }
 }
 
@@ -140,13 +277,10 @@ async function onStart() {
     setBusy(true);
 
     try {
-        const r = await fetch("/api/classify/start", {
+        const r = await apiFetch("/api/classify/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                ...input,
-                model: $("model-select").value,
-            }),
+            body: JSON.stringify(input),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
         const data = await r.json();
@@ -177,13 +311,12 @@ async function onFinalize() {
     setBusy(true);
 
     try {
-        const r = await fetch("/api/classify/finalize", {
+        const r = await apiFetch("/api/classify/finalize", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 session_id: state.sessionId,
                 answers,
-                model: $("model-select").value,
             }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
@@ -425,10 +558,10 @@ async function onChatSend() {
             ? `/api/chat/${chatState.chatId}/message`
             : `/api/chat/start`;
         const body = chatState.chatId
-            ? { text, model: $("model-select").value }
-            : { initial_description: text, model: $("model-select").value };
+            ? { text }
+            : { initial_description: text };
 
-        const r = await fetch(url, {
+        const r = await apiFetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
@@ -553,13 +686,12 @@ async function onBatchStart() {
 
     const form = new FormData();
     form.append("file", batchState.file);
-    form.append("model", $("model-select").value || "");
 
     setBusy(true);
     setStatus("Загружаем файл и запускаем обработку…");
 
     try {
-        const r = await fetch("/api/classify/batch", { method: "POST", body: form });
+        const r = await apiFetch("/api/classify/batch", { method: "POST", body: form });
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
         const data = await r.json();
         batchState.jobId = data.job_id;
@@ -594,7 +726,7 @@ function stopBatchPolling() {
 async function pollBatchStatus() {
     if (!batchState.jobId) return;
     try {
-        const r = await fetch(`/api/classify/batch/${batchState.jobId}`);
+        const r = await apiFetch(`/api/classify/batch/${batchState.jobId}`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const s = await r.json();
         const pct = s.total > 0 ? Math.round((s.processed / s.total) * 100) : 0;

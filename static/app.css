@@ -290,7 +290,9 @@ textarea:focus, input:focus, select:focus {
 }
 
 .modal-actions {
-    margin-top: 1rem;
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
 }
 
 .hint-inline {
@@ -298,6 +300,97 @@ textarea:focus, input:focus, select:focus {
     font-weight: 400;
     font-size: 0.8125rem;
     margin-left: 0.25rem;
+}
+
+/* secure-hint banner в шапке модалки */
+
+.hint-secure {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 0.875rem;
+    background: rgba(99, 102, 241, 0.06);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: var(--radius-sm);
+    margin-bottom: 1.25rem;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+}
+
+.hint-icon {
+    flex-shrink: 0;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+/* input + кнопка-glaza справа */
+
+.input-with-toggle {
+    position: relative;
+    display: block;
+}
+
+.input-with-toggle input {
+    width: 100%;
+    padding-right: 2.5rem;
+}
+
+.input-toggle {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    cursor: pointer;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.input-toggle:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* "Дополнительно" — collapsible через <details> */
+
+.advanced-details > summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    user-select: none;
+    padding: 0.375rem 0;
+    list-style: none;
+    transition: color 120ms;
+}
+
+.advanced-details > summary::-webkit-details-marker { display: none; }
+
+.advanced-details > summary::before {
+    content: "▸ ";
+    display: inline-block;
+    transition: transform 120ms;
+    margin-right: 0.25rem;
+}
+
+.advanced-details[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.advanced-details > summary:hover {
+    color: var(--text);
+}
+
+.advanced-details > .field {
+    margin-top: 0.5rem;
 }
 
 select {

@@ -85,9 +85,13 @@ function populateModelSelect() {
         opt.selected = true;
         sel.appendChild(opt);
     }
-    // base_url показываем только когда провайдер его поддерживает
-    const showBaseUrl = provInfo.needs_base_url;
-    $("settings-base-url-field").hidden = !showBaseUrl;
+    // Раздел «Дополнительно» (с base_url) имеет смысл только для провайдеров с base_url
+    const showBaseUrl = !!provInfo.needs_base_url;
+    const advanced = $("settings-advanced");
+    if (advanced) {
+        advanced.hidden = !showBaseUrl;
+        if (!showBaseUrl) advanced.open = false;
+    }
 }
 
 
@@ -98,10 +102,36 @@ function openSettings() {
         return;
     }
     $("settings-provider").value = settings.provider;
-    $("settings-api-key").value = settings.apiKey;
+    const apiKeyInput = $("settings-api-key");
+    apiKeyInput.value = settings.apiKey;
+    apiKeyInput.type = "password";   // всегда открываем модалку с ключом скрытым
+    $("settings-key-toggle").textContent = "👁";
     $("settings-base-url").value = settings.baseUrl;
+    // если у юзера уже задан base_url — раскроем «Дополнительно», чтобы было видно
+    $("settings-advanced").open = !!settings.baseUrl;
     populateModelSelect();
+    refreshSettingsValidity();
     $("settings-modal").hidden = false;
+    setTimeout(() => apiKeyInput.focus(), 50);
+}
+
+
+function refreshSettingsValidity() {
+    const hasKey = $("settings-api-key").value.trim().length > 0;
+    $("settings-save-btn").disabled = !hasKey;
+}
+
+
+function toggleApiKeyVisibility() {
+    const inp = $("settings-api-key");
+    const btn = $("settings-key-toggle");
+    if (inp.type === "password") {
+        inp.type = "text";
+        btn.textContent = "🙈";
+    } else {
+        inp.type = "password";
+        btn.textContent = "👁";
+    }
 }
 
 
@@ -156,6 +186,8 @@ document.addEventListener("DOMContentLoaded", () => {
     $("settings-save-btn").addEventListener("click", onSettingsSave);
     $("settings-clear-btn").addEventListener("click", onSettingsClear);
     $("settings-provider").addEventListener("change", onSettingsProviderChange);
+    $("settings-key-toggle").addEventListener("click", toggleApiKeyVisibility);
+    $("settings-api-key").addEventListener("input", refreshSettingsValidity);
     qsa("[data-close]").forEach(el => el.addEventListener("click", closeSettings));
     document.addEventListener("keydown", (e) => {
         if (e.key === "Escape" && !$("settings-modal").hidden) closeSettings();

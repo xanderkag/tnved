@@ -249,9 +249,9 @@
                 <h2>Настройки LLM</h2>
                 <button class="modal-close" data-close aria-label="Закрыть">×</button>
             </div>
-            <p class="hint">
-                Ключ хранится <strong>только в твоём браузере</strong> (localStorage) и
-                отправляется на сервер заголовком только для конкретного запроса.
+            <p class="hint hint-secure">
+                <span class="hint-icon" aria-hidden="true">🔒</span>
+                Ключ остаётся в браузере (localStorage). На сервер уходит заголовком только для конкретного запроса, нигде не сохраняется.
             </p>
 
             <div class="form-grid">
@@ -270,20 +270,27 @@
 
                 <div class="field full">
                     <label for="settings-api-key">API-ключ</label>
-                    <input id="settings-api-key" type="password"
-                        autocomplete="off" placeholder="sk-... / sk-ant-...">
+                    <div class="input-with-toggle">
+                        <input id="settings-api-key" type="password"
+                            autocomplete="off" placeholder="sk-... / sk-ant-...">
+                        <button type="button" id="settings-key-toggle" class="input-toggle"
+                                aria-label="Показать/скрыть ключ" title="Показать/скрыть">👁</button>
+                    </div>
                 </div>
 
-                <div class="field full" id="settings-base-url-field">
-                    <label for="settings-base-url">Base URL <span class="hint-inline">(опционально, для vLLM / прокси)</span></label>
-                    <input id="settings-base-url" type="text" autocomplete="off"
-                        placeholder="https://api.openai.com/v1">
-                </div>
+                <details class="field full advanced-details" id="settings-advanced">
+                    <summary>Дополнительно</summary>
+                    <div class="field" id="settings-base-url-field">
+                        <label for="settings-base-url">Base URL <span class="hint-inline">для vLLM / собственного прокси (OpenAI-совместимого)</span></label>
+                        <input id="settings-base-url" type="text" autocomplete="off"
+                            placeholder="https://api.openai.com/v1">
+                    </div>
+                </details>
             </div>
 
             <div class="row row-spread modal-actions">
                 <button id="settings-clear-btn" class="ghost">Сбросить</button>
-                <button id="settings-save-btn" class="primary">Сохранить</button>
+                <button id="settings-save-btn" class="primary" disabled>Сохранить</button>
             </div>
         </div>
     </div>

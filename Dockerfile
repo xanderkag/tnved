@@ -14,8 +14,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# constraints.txt — версии, с которыми образ проверен на kb-docker: без них
+# пересборка берёт свежие версии, и faiss-cpu 1.14+ падал там с SIGILL.
+COPY requirements.txt constraints.txt ./
+RUN pip install -r requirements.txt -c constraints.txt
 
 COPY . .
 

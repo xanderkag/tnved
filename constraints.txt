@@ -1,0 +1,43 @@
+# Версии, с которыми образ проверен на kb-docker 25.09.2026 (pip freeze из
+# рабочего контейнера после дымовой проверки: /health, векторы, классификация).
+# Dockerfile ставит requirements.txt с этими ограничениями — пересборка даёт
+# тот же набор, а не свежие мажорные версии: faiss-cpu 1.14+ без предупреждения
+# уронил сервис на процессоре без AVX (см. requirements.txt).
+# Обновлять осознанно: поднять версию, собрать, проверить на kb-docker и снова
+# снять pip freeze из контейнера.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+et_xmlfile==2.0.0
+faiss-cpu==1.13.2
+fastapi==0.141.1
+h11==0.16.0
+httpcore2==2.13.1
+httptools==0.8.0
+httpx2==2.13.1
+idna==3.20
+jiter==0.17.0
+lxml==6.1.3
+numpy==2.4.6
+openai==3.19.2
+openpyxl==3.1.5
+packaging==26.3
+pydantic==2.13.5
+pydantic_core==2.46.5
+python-dotenv==1.2.3
+python-multipart==0.0.32
+PyYAML==6.0.3
+requests==2.34.2
+sniffio==1.3.1
+starlette==1.7.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==17.1

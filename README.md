@@ -31,6 +31,7 @@ build_index.py      # векторы → FAISS + meta.json + паспорт ин
 check_embeddings.py # сверка сервера векторов с индексом — по самим векторам, не по имени
 demo_server.py      # ⚠️ mock-API для превью без LLM/FAISS (НЕ в Docker-образе)
 Dockerfile
+constraints.txt     # версии пакетов, с которыми образ проверен на kb-docker (pip freeze)
 docker-compose.yml  # app + Caddy reverse-proxy на :8000
 Caddyfile
 .env.example
@@ -48,6 +49,8 @@ docker compose up -d --build
 ```
 
 Индекс в образе не считается: до сборки в `data/` должны лежать `tnved.db`, `tnved.faiss`, `tnved_meta.json` и `tnved_index_info.json` (`data/` в `.gitignore` — файлы переносятся отдельно). Без индекса полный билд падает с причиной; `LITE_MODE=1` собирается и без него. Нет `tnved.db` — билд сам скачает и разберёт справочник. torch и модель e5 в образ не входят.
+
+Версии пакетов образа закреплены в `constraints.txt` — это набор, проверенный на kb-docker. faiss-cpu — не выше 1.13: с 1.14 колесо для Linux требует AVX, а у kb-docker процессор без AVX, и поиск падает с SIGILL (процесс умирает без трейсбэка, Caddy отдаёт 502). Поднимаете версию — соберите, проверьте на kb-docker и перепишите `constraints.txt` из `pip freeze` контейнера.
 
 Сменили `EMBEDDINGS_BASE_URL` — `docker compose exec app python check_embeddings.py`. Паспорт индекса сверяет только имя модели, а у Ollama и vLLM оно одно (`bge-m3`); скрипт сравнивает сами векторы с записанными в индексе и отказывает, если косинус ниже 0,995.
 

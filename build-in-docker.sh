@@ -21,7 +21,7 @@ case "${EMBEDDER_BACKEND:-api}" in
       echo "задайте EMBEDDINGS_BASE_URL — адрес сервера векторов (e5 на CPU — только EMBEDDER_BACKEND=local)" >&2
       exit 1
     fi
-    INSTALL="pip install -q --no-input -r requirements.txt" ;;
+    INSTALL="pip install -q --no-input -r requirements.txt -c constraints.txt" ;;
   local)
     # torch — CPU-сборкой, иначе pip потянет CUDA на гигабайты
     INSTALL="pip install -q --no-input torch --index-url https://download.pytorch.org/whl/cpu && pip install -q --no-input -r requirements-e5.txt" ;;

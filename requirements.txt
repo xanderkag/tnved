@@ -2,7 +2,11 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.0
 openai>=1.40.0
-faiss-cpu>=1.7.4
+# Не выше 1.13: с 1.14 в колесе для Linux одна сборка, и она требует AVX, а у
+# kb-docker процессор QEMU Virtual CPU без AVX (только SSE4.2) — поиск падает
+# с SIGILL, процесс умирает без трейсбэка. В 1.13.2 три сборки (generic, avx2,
+# avx512), загрузчик сам берёт подходящую. Проверено 25.09 на kb-docker.
+faiss-cpu==1.13.2
 requests>=2.31.0
 lxml>=4.9.3
 openpyxl>=3.1.2

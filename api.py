@@ -249,6 +249,7 @@ async def classify_finalize(
         description=description,
         group_code=group_code,
         cfg=cfg,
+        headings=session["triage"].get("headings"),
     )
 
     session["answers"] = [a.model_dump() for a in req.answers]
@@ -259,10 +260,7 @@ async def classify_finalize(
     return {
         "session_id": req.session_id,
         "description": description,
-        "group": {
-            "code": group_code,
-            "name": session["triage"].get("group_name", ""),
-        },
+        "group": {"code": result["group_code"], "name": result["group_name"]},
         "result": result,
     }
 
@@ -389,6 +387,7 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
             description=chat["description"],
             group_code=triage_res.get("group_code", ""),
             cfg=cfg,
+            headings=triage_res.get("headings"),
         )
         chat["triage"] = triage_res
         chat["result"] = result
@@ -596,11 +595,11 @@ async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
     """В батче пропускаем уточнения: триаж → классификация на исходном описании."""
     store = _require_store()
     triage_result = await triage(store, description, cfg)
-    group_code = triage_result.get("group_code", "")
-    result = await classify(store, description, group_code, cfg=cfg)
+    result = await classify(store, description, triage_result.get("group_code", ""), cfg=cfg,
+                            headings=triage_result.get("headings"))
     return {
-        "group_code": group_code,
-        "group_name": triage_result.get("group_name", ""),
+        "group_code": result["group_code"],
+        "group_name": result["group_name"],
         "primary": result.get("primary", {}),
         "alternatives": result.get("alternatives", [])[:2],
     }

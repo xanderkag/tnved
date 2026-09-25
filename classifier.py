@@ -1,8 +1,9 @@
 """
 Двухстадийный пайплайн классификации ТН ВЭД.
 
-Stage 1 (triage): по описанию определяет вероятную группу + что не хватает.
-Stage 2 (classify): из кандидатов внутри группы выбирает финальный код + альтернативы.
+Stage 1 (triage): по описанию определяет вероятную группу, до 3 позиций + что не хватает.
+Stage 2 (classify): кандидаты — лучшие коды группы и названных позиций (позиции могут быть
+из других групп); модель выбирает финальный код + альтернативы.
 
 LLM — только наша модель на нашем железе: OpenAI-совместимый адрес (vLLM)
 из env сервера, ответ — строгий JSON (response_format=json_object). Модель
@@ -140,11 +141,15 @@ TRIAGE_SYSTEM = """Ты эксперт-классификатор ТН ВЭД Е
 
 Задача: по описанию товара
 1) определить наиболее вероятную ГРУППУ (2 знака) ТН ВЭД,
-2) оценить полноту информации для классификации до 10 знаков,
-3) если данных недостаточно — сформулировать конкретные уточняющие вопросы.
+2) назвать до 3 наиболее вероятных ТОВАРНЫХ ПОЗИЦИЙ (4 знака), самую вероятную первой.
+   Позиции могут быть из разных групп: например, для части или принадлежности — позиция
+   частей той машины, для которой она предназначена, и позиция по её собственной функции,
+3) оценить полноту информации для классификации до 10 знаков,
+4) если данных недостаточно — сформулировать конкретные уточняющие вопросы.
 
 Важно:
 - Группу выбирай ТОЛЬКО из предоставленного списка.
+- Позиция — 4 цифры кода ТН ВЭД (например, "8471"). Не уверен — назови меньше.
 - Вопросы должны касаться характеристик, реально влияющих на классификацию в этой группе:
   состав/материал, способ обработки, форма, назначение, технические параметры.
 - Не задавай очевидных вопросов и не повторяйся.
@@ -154,6 +159,7 @@ TRIAGE_SYSTEM = """Ты эксперт-классификатор ТН ВЭД Е
 {
   "group_code": "XX",
   "group_name": "...",
+  "headings": ["XXXX"],
   "completeness": "high" | "medium" | "low",
   "missing_aspects": ["..."],
   "questions": [
@@ -166,12 +172,15 @@ CLASSIFY_SYSTEM = """Ты эксперт-классификатор ТН ВЭД 
 
 Тебе дано:
 - полное описание товара со всеми ответами на уточнения,
-- определённая группа ТН ВЭД,
-- список кандидатных кодов с полной иерархией (раздел → группа → позиция → субпозиция → подсубпозиция),
+- предварительно определённая группа ТН ВЭД и вероятные товарные позиции (они могут быть из других групп),
+- список кандидатных кодов с полной иерархией (раздел → группа → позиция → субпозиция → подсубпозиция):
+  коды этой группы и коды названных позиций,
 - Основные правила интерпретации (ОПИ).
 
 Задача:
-1) выбрать ОДИН наиболее точный код из кандидатов (10 знаков, в формате как в кандидатах),
+1) выбрать ОДИН наиболее точный код из кандидатов (10 знаков, в формате как в кандидатах).
+   Код бери только из списка кандидатов и не составляй сам: такого кода может не быть в тарифе.
+   Группа предварительная: если по ОПИ точнее код другой группы из списка — выбирай его,
 2) указать 1–2 близкие альтернативы и пояснить, почему они отвергнуты,
 3) указать применённые ОПИ,
 4) если есть моменты, которые декларант должен проверить вручную — перечислить их,
@@ -279,6 +288,29 @@ def _check_codes(store: TNVEDStore, result: dict, candidate_codes: set[str]) -> 
 
 # ─── stage 1 — triage ────────────────────────────────────────────────────────
 
+# Позиции от triage: сколько берём и сколько лучших кодов каждой добавляем к кандидатам.
+MAX_HEADINGS = 3
+HEADING_TOP_K = 8
+
+
+def _valid_headings(store: TNVEDStore, raw: object) -> list[str]:
+    """Позиции из ответа triage → до 3 четырёхзначных, у которых есть действующие коды.
+
+    «8473 30», «84.73» → 8473: позиция — первые 4 цифры. Группа («84»), позиция без
+    действующих кодов и повтор отбрасываются — в поиск идёт только то, что есть в тарифе.
+    """
+    if isinstance(raw, str):
+        raw = re.split(r"[,;]", raw)
+    if not isinstance(raw, list):
+        return []
+    headings: list[str] = []
+    for item in raw:
+        digits = _code_digits(item)
+        if len(digits) >= 4 and digits[:4] in store.current_headings and digits[:4] not in headings:
+            headings.append(digits[:4])
+    return headings[:MAX_HEADINGS]
+
+
 async def triage(
     store: TNVEDStore,
     description: str,
@@ -296,7 +328,10 @@ async def triage(
     if len(group_code) == 1:
         group_code = group_code.zfill(2)
     result["group_code"] = group_code
-    result.setdefault("group_name", "")
+    # Название — из базы: модель переписывала его из списка с опечатками («АППАТУРА»).
+    group = store.group_info(group_code) if group_code else None
+    result["group_name"] = group["description"] if group else ""
+    result["headings"] = _valid_headings(store, result.get("headings"))
     result.setdefault("completeness", "low")
     result.setdefault("missing_aspects", [])
     result.setdefault("questions", [])
@@ -336,8 +371,9 @@ async def classify(
     group_code: str,
     cfg: LLMConfig,
     top_k: int = 12,
+    headings: list[str] | None = None,
 ) -> dict:
-    """Финальная классификация: ищем кандидатов в группе, LLM выбирает код."""
+    """Финальная классификация: кандидаты из группы и из позиций triage, LLM выбирает код."""
     # В lite-режиме store игнорирует top_k и отдаёт LITE_TOP_K листьев группы;
     # в полном режиме это векторный поиск (CPU-bound, поэтому в to_thread).
     candidates = await asyncio.to_thread(
@@ -348,6 +384,19 @@ async def classify(
     if not candidates:
         candidates = await asyncio.to_thread(store.search, description, top_k=top_k)
 
+    # Лучшие коды позиций, названных triage, — в том числе из других групп. По английскому
+    # описанию поиск в группе приносит шум (у кабеля Mini-SAS 12 из 12 — носители 8523 29),
+    # а нужной подпозиции в нём нет, и модель дописывала хвост кода сама (пилот-10).
+    have = {c["code"] for c in candidates}
+    for heading in headings or []:
+        found = await asyncio.to_thread(
+            store.search, description, top_k=HEADING_TOP_K, group_code=heading
+        )
+        for c in found[:HEADING_TOP_K]:  # в LITE search отдаёт всю позицию
+            if c["code"] not in have:
+                have.add(c["code"])
+                candidates.append(c)
+
     candidates_text = "\n".join(
         f"  {i+1}. [{c['code']}] {_path_for_prompt(c, group_code)}"
         for i, c in enumerate(candidates)
@@ -355,10 +404,12 @@ async def classify(
 
     group_info = store.group_info(group_code)
     group_line = f"{group_info['code']} {group_info['description']}" if group_info else group_code
+    headings_line = f"ВЕРОЯТНЫЕ ПОЗИЦИИ: {', '.join(headings)}\n\n" if headings else ""
 
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"ОПРЕДЕЛЁННАЯ ГРУППА: {group_line}\n\n"
+        f"{headings_line}"
         f"КАНДИДАТЫ:\n{candidates_text}\n\n"
         f"{GRI_HINT_FOR_PROMPT}"
     )
@@ -401,4 +452,9 @@ async def classify(
     ]
 
     result["candidates"] = candidates
+    # Группа ответа — группа выданного кода: он мог прийти из позиции другой группы.
+    # Код не выдан — группа triage. Название — из базы.
+    result["group_code"] = code[:2] if code else group_code
+    group = store.group_info(result["group_code"]) if result["group_code"] else None
+    result["group_name"] = group["description"] if group else ""
     return result

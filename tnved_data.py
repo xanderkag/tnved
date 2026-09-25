@@ -13,6 +13,7 @@ LITE_MODE=0 (или не задан) → нормальный режим с ве
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sqlite3
@@ -94,10 +95,16 @@ class TNVEDStore:
 
             self._check_index_passport(expected_name())
             self.embedder = get_embedder()
+            # classify ищет одним описанием в группе и в каждой позиции от triage —
+            # вектор запроса считаем один раз.
+            self._query_vec = functools.lru_cache(maxsize=256)(
+                lambda query: self.embedder.encode([query], is_query=True))
             print(f"[tnved] векторный поиск: {self.embedder.name}, "
                   f"{self.index.ntotal:,} векторов")
 
         self.code_to_meta = {m["code"]: m for m in self.meta}
+        # Позиции (4 знака), у которых есть действующие коды: только такие от triage берём в поиск.
+        self.current_headings = {m["code"][:4] for m in self.meta if is_current_leaf(m)}
 
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
@@ -152,7 +159,8 @@ class TNVEDStore:
     def search(self, query: str, top_k: int = 12, group_code: str | None = None) -> list[dict]:
         """Кандидаты — только действующие 10-значные коды (is_current_leaf).
 
-        В нормальном режиме — векторный поиск; в LITE — sql-фильтр по группе.
+        group_code — начало кода: группа (2 знака) или позиция (4).
+        В нормальном режиме — векторный поиск; в LITE — sql-фильтр по началу кода.
         """
         if self.lite:
             return self._search_lite(group_code)
@@ -161,7 +169,7 @@ class TNVEDStore:
         # Кандидатов в индексе меньше половины (остальное — 6/8-значные и снятые),
         # и их длинные тексты вытесняют листья из верха выдачи. Индекс точный
         # (IndexFlatIP), поэтому берём выдачу целиком: 30 тыс. оценок — миллисекунды.
-        vec = self.embedder.encode([query], is_query=True)
+        vec = self._query_vec(query)
         scores, ids = self.index.search(vec, int(self.index.ntotal))
         results: list[dict] = []
         for score, idx in zip(scores[0], ids[0]):

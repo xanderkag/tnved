@@ -595,6 +595,27 @@ async def _refine_tail(
     })
 
 
+def _calibrate_confidence(result: dict) -> None:
+    """high — только если модель сама не называет соперника из другой товарной позиции.
+
+    Прогон холдинга 4e50958: high верна на 4 знаках в 62 из 81; у high, где обе первые
+    альтернативы из той же позиции (4 знака), — в 53 из 54, в прошлых прогонах 93–100 %.
+    Альтернатива из другой позиции — high → medium и проверка. Первые две альтернативы —
+    те, что видны в пакете и чате; на них и мерили. 10 знаков правило почти не лечит
+    (35 → 43 %): ошибка там — подпозиции, неразличимые по описанию (9401 39 / 61 / 71).
+    """
+    primary = result["primary"]
+    code = primary.get("code") or ""
+    if primary.get("confidence") != "high" or not code:
+        return
+    rivals = [a["code"] for a in result["alternatives"][:2] if a.get("code") and a["code"][:4] != code[:4]]
+    if rivals:
+        primary["confidence"] = "medium"
+        primary["confidence_lowered"] = f"альтернатива из другой товарной позиции: {', '.join(rivals)}"
+        result["checks_required"].append(
+            f"Позиция {code[:4]} не бесспорна: модель называет и {', '.join(rivals)} — сверить по примечаниям.")
+
+
 async def classify(
     store: TNVEDStore,
     description: str,
@@ -664,6 +685,7 @@ async def classify(
     candidate_codes = {c["code"] for c in candidates}
     _check_codes(store, result, candidate_codes)
     await _refine_tail(store, description, result, candidate_codes, cfg)
+    _calibrate_confidence(result)
 
     # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]

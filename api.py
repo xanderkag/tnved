@@ -425,7 +425,7 @@ def _chat_format_finalization(triage_res: dict, classify_res: dict) -> str:
     if checks:
         lines.append("")
         lines.append("**Стоит проверить вручную:**")
-        for c in checks[:3]:
+        for c in checks:
             lines.append(f"- {c}")
     return "\n".join(lines)
 
@@ -701,6 +701,7 @@ async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
         "group_name": result["group_name"],
         "primary": result.get("primary", {}),
         "alternatives": result.get("alternatives", [])[:2],
+        "checks_required": result.get("checks_required", []),
     }
 
 
@@ -814,15 +815,15 @@ async def classify_batch_download(job_id: str):
     ws.append([
         "Строка файла", "Описание", "Артикул", "Производитель", "Страна",
         "Код ТН ВЭД", "Наименование", "Пошлина", "Уверенность",
-        "Группа", "Альт. 1", "Альт. 1 пошлина", "Альт. 2", "Альт. 2 пошлина", "Ошибка",
+        "Группа", "Альт. 1", "Альт. 1 пошлина", "Альт. 2", "Альт. 2 пошлина", "Проверить", "Ошибка",
     ])
     for item, r in zip(job["items"], job["results"]):
         source = [item["row"], item["description"], item["article"], item["manufacturer"], item["country"]]
         if r is None:
-            ws.append(source + [""] * 9 + ["обработка прервана"])
+            ws.append(source + [""] * 10 + ["обработка прервана"])
             continue
         if "error" in r:
-            ws.append(source + [""] * 9 + [r["error"]])
+            ws.append(source + [""] * 10 + [r["error"]])
             continue
         primary = r.get("primary") or {}
         alts = r.get("alternatives") or []
@@ -839,6 +840,7 @@ async def classify_batch_download(job_id: str):
             a1.get("duty_rate") or "",
             a2.get("code", ""),
             a2.get("duty_rate") or "",
+            "\n".join(f"— {c}" for c in r.get("checks_required") or []),
             f"код не выдан: {primary['rejected']}" if primary.get("rejected") else "",
         ])
 

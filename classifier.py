@@ -616,6 +616,41 @@ def _calibrate_confidence(result: dict) -> None:
             f"Позиция {code[:4]} не бесспорна: модель называет и {', '.join(rivals)} — сверить по примечаниям.")
 
 
+# Подвид внутри позиции по короткому описанию часто не различить: на холдинге (4e50958) позиция
+# верна, а подпозиция нет — в 67 строках из 174 (9401 39 / 61 / 71: вращающаяся с регулировкой
+# высоты, деревянный или металлический каркас). Модель тогда обычно сама называет соседнюю
+# подпозицию альтернативой (120 строк, из них подпозиция неверна в 86; верная среди альтернатив —
+# в 24 из 67). Такую альтернативу показываем путём по тарифу без общей с кодом части — признак,
+# которым подпозиции различаются, виден сразу. Уверенность не трогаем: соперник из той же
+# позиции есть почти у каждого high (77 из 81), понижение обесценило бы уверенность целиком.
+RIVAL_PATH_LIMIT = 160
+
+
+def _norm_level(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text).lower()
+
+
+def _subheading_rivals(store: TNVEDStore, result: dict) -> None:
+    code = result["primary"].get("code") or ""
+    if not code:
+        return
+    rivals = [a["code"] for a in result["alternatives"][:2]
+              if a.get("code", "")[:4] == code[:4] and a["code"][:6] != code[:6]]
+    if not rivals:
+        return
+    # уровни группы и позиции — общие, их не показываем (в пути они бывают, а бывают и нет)
+    skip = {_norm_level(h.get("description") or "") for h in store.hierarchy(code)[:2]}
+
+    codes = [code, *rivals]
+    paths = [[s for s in _path_levels(store.code_to_meta.get(c, {})) if _norm_level(s) not in skip] for c in codes]
+    common = 0  # общие верхние уровни — тоже не показываем, у каждого кода остаётся хоть один
+    while all(len(p) > common + 1 for p in paths) and len({p[common] for p in paths}) == 1:
+        common += 1
+    parts = "; ".join(f"{c[:4]} {c[4:6]} ({c}) — {_cut_level(PATH_SEP.join(p[common:]), RIVAL_PATH_LIMIT) or '—'}"
+                      for c, p in zip(codes, paths))
+    result["checks_required"].append(f"Подпозиция по описанию не бесспорна: {parts}. Сверить признак с товаром.")
+
+
 async def classify(
     store: TNVEDStore,
     description: str,
@@ -686,6 +721,7 @@ async def classify(
     _check_codes(store, result, candidate_codes)
     await _refine_tail(store, description, result, candidate_codes, cfg)
     _calibrate_confidence(result)
+    _subheading_rivals(store, result)
 
     # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]

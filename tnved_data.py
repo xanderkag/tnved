@@ -21,8 +21,7 @@ BASE = Path(__file__).parent
 DB_PATH = BASE / "data" / "tnved.db"
 FAISS_PATH = BASE / "data" / "tnved.faiss"
 META_PATH = BASE / "data" / "tnved_meta.json"
-
-EMBEDDER_MODEL = "intfloat/multilingual-e5-base"
+INFO_PATH = BASE / "data" / "tnved_index_info.json"
 
 LITE_MODE = os.environ.get("LITE_MODE", "0") == "1"
 LITE_TOP_K = int(os.environ.get("LITE_TOP_K", "120"))
@@ -63,17 +62,22 @@ class TNVEDStore:
                 for r in rows
             ]
         else:
-            # Полный режим — sentence-transformers + FAISS
-            from sentence_transformers import SentenceTransformer  # noqa: WPS433
+            # Полный режим — векторный поиск по FAISS
             import faiss  # noqa: WPS433
             import numpy as np  # noqa: WPS433
+
+            from embedder import expected_name, get_embedder  # noqa: WPS433
             self._np = np
             self._faiss = faiss
 
-            self.embedder = SentenceTransformer(EMBEDDER_MODEL)
             self.index = faiss.read_index(str(FAISS_PATH))
             with open(META_PATH, encoding="utf-8") as f:
                 self.meta = json.load(f)
+
+            self._check_index_passport(expected_name())
+            self.embedder = get_embedder()
+            print(f"[tnved] векторный поиск: {self.embedder.name}, "
+                  f"{self.index.ntotal:,} векторов")
 
         self.code_to_meta = {m["code"]: m for m in self.meta}
 
@@ -83,6 +87,39 @@ class TNVEDStore:
                 "SELECT code, description FROM codes WHERE level=1 ORDER BY code"
             ).fetchall()
             self.groups = [{"code": r["code"], "description": r["description"]} for r in rows]
+
+    # ─── проверка совместимости индекса ───────────────────────────────────
+
+    def _check_index_passport(self, active: str) -> None:
+        """Индекс, собранный одной моделью, нельзя искать другой.
+
+        У bge-m3 и e5-base разная размерность (1024 против 768) и разное
+        векторное пространство. При несовпадении лучше упасть на старте
+        с понятным сообщением, чем молча выдавать бессмысленные результаты.
+        """
+        if not INFO_PATH.exists():
+            print(f"[tnved] ВНИМАНИЕ: нет паспорта индекса ({INFO_PATH.name}). "
+                  f"Индекс собран старой версией build_index.py — совместимость "
+                  f"с активной моделью «{active}» не проверена. "
+                  f"Надёжнее пересобрать: python build_index.py")
+            return
+
+        with open(INFO_PATH, encoding="utf-8") as f:
+            info = json.load(f)
+
+        if info.get("embedder") != active:
+            raise RuntimeError(
+                f"Индекс собран моделью «{info.get('embedder')}», "
+                f"а сейчас активна «{active}». Векторы несовместимы — поиск "
+                f"выдавал бы случайные коды. Либо верните прежние настройки "
+                f"векторизации, либо пересоберите индекс: python build_index.py"
+            )
+
+        if info.get("dim") and int(info["dim"]) != int(self.index.d):
+            raise RuntimeError(
+                f"Размерность индекса {self.index.d} не совпадает с паспортом "
+                f"{info['dim']} — файлы data/ рассинхронизированы, пересоберите индекс."
+            )
 
     # ─── свойство для совместимости с существующими print'ами ─────────────
 
@@ -99,13 +136,9 @@ class TNVEDStore:
         if self.lite:
             return self._search_lite(group_code)
 
-        # Vector path (full mode)
+        # Vector path (full mode). Префикс запроса, если нужен, добавит бэкенд.
         oversample = top_k * 8 if group_code else top_k
-        vec = self.embedder.encode(
-            [f"query: {query}"],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        ).astype("float32")
+        vec = self.embedder.encode([query], is_query=True)
         scores, ids = self.index.search(vec, oversample)
         results: list[dict] = []
         for score, idx in zip(scores[0], ids[0]):
@@ -117,6 +150,20 @@ class TNVEDStore:
             results.append({**item, "score": float(score)})
             if len(results) >= top_k:
                 break
+
+        # Группа задана, а в топе её кодов почти нет — так бывает, когда группа
+        # маленькая или описание товара непохоже на формулировки классификатора
+        # (например наименование — артикул). Отдавать пустой список нельзя:
+        # группу уже определил triage, кандидаты обязаны быть. Дополняем
+        # листьями группы из SQLite.
+        if group_code and len(results) < top_k:
+            have = {r["code"] for r in results}
+            for row in self._search_lite(group_code):
+                if row["code"] in have:
+                    continue
+                results.append({**row, "score": 0.0})
+                if len(results) >= top_k:
+                    break
         return results
 
     def _search_lite(self, group_code: str | None) -> list[dict]:

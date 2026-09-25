@@ -17,7 +17,15 @@ data/raw/*.xml
 data/raw/*.xlsx
 data/tnved.db
 data/tnved.faiss
+data/tnved_vecs.npy
 data/tnved_meta.json
+data/tnved_index_info.json
+data/tnved_vecs_info.json
+data/vecs_parts/
+embed_log.txt
+build_real.log
+build_v2.log
+eval_v2.log
 
 # IDE
 .vscode/

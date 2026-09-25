@@ -368,6 +368,11 @@ function renderResultStep(data) {
            </details>`
         : "";
 
+    // Код модели не прошёл сверку со справочником (нет, снят, не 10 знаков) — не выдаём.
+    const rejectedHtml = primary.rejected
+        ? `<div class="error">Код не выдан: ${escapeHtml(primary.rejected)}. Нужна ручная классификация.</div>`
+        : "";
+
     const checksHtml = checks.length
         ? `<details class="result-section">
             <summary>Что проверить вручную · ${checks.length}</summary>
@@ -391,6 +396,8 @@ function renderResultStep(data) {
                 ${dutyBadge(primary.duty_rate, "large")}
             </div>
 
+            ${rejectedHtml}
+
             ${shortName ? `<div class="result-shortname">${escapeHtml(shortName)}</div>` : ""}
 
             <details class="result-section result-reasoning" open>
@@ -404,6 +411,8 @@ function renderResultStep(data) {
             ${checksHtml}
         </div>
     `;
+    // Копировать нечего — прячем (disabled снял бы setBusy(false)).
+    $("copy-result-btn").hidden = !primary.code;
 }
 
 

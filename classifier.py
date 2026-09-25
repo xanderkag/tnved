@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 
 from openai import APIError, AsyncOpenAI
@@ -220,6 +221,62 @@ def merge_qa(description: str, answers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ─── сверка ответа со справочником ────────────────────────────────────────────
+
+_CODE_PROBLEM = {
+    "unknown": "такого кода нет в справочнике",
+    "retired": "код снят — есть только в дереве 2017, в действующем тарифе его нет",
+    "not_leaf": "это не 10-значный код, а уровень пути",
+}
+
+
+def _code_digits(raw: object) -> str:
+    """«9401 39 000 0», «9401.39.000.0» → «9401390000»: модель пишет код и с разделителями."""
+    return re.sub(r"\D", "", str(raw or ""))
+
+
+def _check_codes(store: TNVEDStore, result: dict, candidate_codes: set[str]) -> None:
+    """Наружу — только действующий 10-значный код. Модель выдумывала коды (8544300000)
+    и выбирала снятые (9401300001) — такой ответ не выдаём, а показываем причину.
+
+    primary с плохим кодом: code="" (отказ), confidence="low", rejected=причина,
+    model_code=что ответила модель. Плохие альтернативы убираются в rejected_alternatives.
+    Действующий код не из кандидатов принимаем, но уверенность — не выше средней.
+    """
+    primary = result["primary"]
+    raw = str(primary.get("code") or "").strip()
+    code = _code_digits(raw)
+    status = store.code_status(code)[0] if code else "empty"
+    if status == "current":
+        primary["code"] = code
+        primary["in_candidates"] = code in candidate_codes
+        if not primary["in_candidates"]:
+            if primary.get("confidence") == "high":
+                primary["confidence"] = "medium"
+            result["checks_required"].insert(
+                0, f"Код {code} модель выбрала не из найденных кандидатов — проверить по тарифу.")
+    else:
+        reason = "модель не назвала код" if status == "empty" else f"{raw}: {_CODE_PROBLEM[status]}"
+        primary.update(code="", model_code=raw, confidence="low", rejected=reason)
+        result["checks_required"].insert(0, f"Код не выдан — {reason}. Нужна ручная классификация.")
+
+    kept, rejected = [], []
+    for alt in result["alternatives"]:
+        raw_alt = str(alt.get("code") or "").strip()
+        alt_code = _code_digits(raw_alt)
+        alt_status = store.code_status(alt_code)[0] if alt_code else "empty"
+        if alt_status != "current":
+            reason = "нет кода" if alt_status == "empty" else _CODE_PROBLEM[alt_status]
+            rejected.append({"code": raw_alt, "reason": reason})
+        elif alt_code == primary["code"] or any(a["code"] == alt_code for a in kept):
+            rejected.append({"code": raw_alt, "reason": "повтор"})
+        else:
+            alt["code"] = alt_code
+            kept.append(alt)
+    result["alternatives"] = kept
+    result["rejected_alternatives"] = rejected
+
+
 # ─── stage 1 — triage ────────────────────────────────────────────────────────
 
 async def triage(
@@ -289,16 +346,21 @@ async def classify(
     )
     result = await llm_json(cfg, CLASSIFY_SYSTEM, user)
 
-    # Валидация
-    primary = result.get("primary") or {}
+    # Валидация: вместо объекта или списка модель может вернуть null или строку с кодом
+    primary = result.get("primary")
+    if not isinstance(primary, dict):
+        primary = {"code": primary or ""}
     primary.setdefault("code", "")
     primary.setdefault("reasoning", "")
     primary.setdefault("confidence", "medium")
     result["primary"] = primary
 
-    result.setdefault("alternatives", [])
-    result.setdefault("gri_applied", [])
-    result.setdefault("checks_required", [])
+    for key in ("alternatives", "gri_applied", "checks_required"):
+        if not isinstance(result.get(key), list):
+            result[key] = []
+    result["alternatives"] = [a if isinstance(a, dict) else {"code": a} for a in result["alternatives"]]
+
+    _check_codes(store, result, {c["code"] for c in candidates})
 
     # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]

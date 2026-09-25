@@ -307,7 +307,10 @@ def _chat_format_finalization(triage_res: dict, classify_res: dict) -> str:
     reasoning = primary.get("reasoning", "") or ""
     full_path = primary.get("full_path") or ""
 
-    lines = [f"**Код:** `{code}`"]
+    if primary.get("rejected"):
+        lines = [f"**Код не выдан:** {primary['rejected']}. Нужна ручная классификация."]
+    else:
+        lines = [f"**Код:** `{code}`"]
     if full_path:
         lines.append(f"_{full_path}_")
     lines.append(f"**Пошлина:** {duty}  **Уверенность:** {conf}")
@@ -633,7 +636,7 @@ async def classify_batch_download(job_id: str):
             a1.get("duty_rate") or "",
             a2.get("code", ""),
             a2.get("duty_rate") or "",
-            "",
+            f"код не выдан: {primary['rejected']}" if primary.get("rejected") else "",
         ])
 
     bio = BytesIO()

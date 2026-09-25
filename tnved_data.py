@@ -251,6 +251,25 @@ class TNVEDStore:
                     chain.append({"code": row["code"], "description": row["description"]})
         return chain
 
+    def code_status(self, code: str) -> tuple[str, dict | None]:
+        """Код по справочнику: current | retired | not_leaf | unknown — и его строка из codes.
+
+        current — действующий 10-значный (можно отдавать как ответ); retired — только
+        в дереве 2017; not_leaf — 2–8 знаков, уровень пути; unknown — кода нет вовсе.
+        """
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT code, description, full_path, duty_rate, data_source FROM codes WHERE code = ?",
+                (code,),
+            ).fetchone()
+        if row is None:
+            return "unknown", None
+        item = dict(row)
+        if len(code) != 10:
+            return "not_leaf", item
+        return ("current" if is_current_leaf(item) else "retired"), item
+
     def group_info(self, group_code: str) -> dict | None:
         """Информация о группе (2 знака)."""
         with sqlite3.connect(DB_PATH) as conn:

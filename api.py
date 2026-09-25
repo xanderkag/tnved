@@ -7,7 +7,9 @@ FastAPI-бэкенд: двухстадийный пайплайн классиф
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
+import io
 import os
 import re
 import uuid
@@ -303,6 +305,62 @@ CODE_RE = re.compile(r"\d{2}|\d{4}|\d{6}|\d{8}|\d{10}")
 async def codes_version():
     """Версия справочника: дата сборки базы и тарифа, число кодов — чтобы потребитель видел, с чем сверяется."""
     return _require_store().version()
+
+
+EXPORT_DIR = BASE / "exports"
+_export_cache: dict[tuple, dict] = {}
+
+
+def _codes_export() -> dict:
+    """Последняя выгрузка export_codes.py, сверенная с базой: {path, sha256, tariff_as_of, rows}.
+
+    Путь в выгрузке — цепочка самого тарифа (data/raw), из базы её не восстановить, поэтому
+    отдаём готовый файл. Файл от другой сборки базы или другого тарифа не отдаём — 503.
+    """
+    files = sorted(EXPORT_DIR.glob("tnved10_paths_*.csv"))
+    if not files:
+        raise HTTPException(503, "Выгрузки справочника нет: python export_codes.py и положить exports/ в образ")
+    path = files[-1]
+    key = (path, path.stat().st_mtime_ns)
+    if key not in _export_cache:
+        data = path.read_bytes()
+        reader = csv.DictReader(io.StringIO(data.decode("utf-8"), newline=""), delimiter=";")
+        rows = list(reader)
+        _export_cache.clear()
+        _export_cache[key] = {
+            "path": path,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "rows": len(rows),
+            "tariff_as_of": {r["tariff_as_of"] for r in rows},
+            "db_built_at": {r["db_built_at"] for r in rows},
+        }
+    info = _export_cache[key]
+    version = _require_store().version()
+    problems = []
+    if info["tariff_as_of"] != {version["tariff_as_of"]}:
+        problems.append(f"тариф в файле {sorted(info['tariff_as_of'])}, в базе {version['tariff_as_of']}")
+    if info["db_built_at"] != {(version["db_built_at"] or "")[:10]}:
+        problems.append(f"сборка базы в файле {sorted(info['db_built_at'])}, в базе {version['db_built_at']}")
+    if info["rows"] != version["codes10"]:
+        problems.append(f"кодов в файле {info['rows']}, в базе {version['codes10']}")
+    if problems:
+        raise HTTPException(503, f"Выгрузка {path.name} не от этой базы: {'; '.join(problems)}. "
+                                 "Пересоберите: python export_codes.py")
+    return {**info, "tariff_as_of": version["tariff_as_of"]}
+
+
+@app.get("/api/codes/export")
+async def codes_export():
+    """Весь справочник 10-значных кодов с путём — файл export_codes.py (UTF-8, «;», CRLF).
+
+    Версия — в имени файла (дата тарифа) и в заголовках X-Tariff-As-Of, X-Content-SHA256.
+    """
+    info = await asyncio.to_thread(_codes_export)
+    return FileResponse(
+        info["path"], media_type="text/csv; charset=utf-8", filename=info["path"].name,
+        headers={"X-Tariff-As-Of": info["tariff_as_of"], "X-Content-SHA256": info["sha256"],
+                 "X-Codes": str(info["rows"])},
+    )
 
 
 @app.get("/api/codes/{code}")

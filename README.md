@@ -127,6 +127,7 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 | `POST` | `/api/chat/{id}/message` | Реплика в чат |
 | `GET`  | `/api/chat/{id}` | Снимок чата |
 | `GET`  | `/api/codes` | Версия справочника: `db_built_at`, `tariff_as_of`, `codes10`, `codes10_current` |
+| `GET`  | `/api/codes/export` | Весь справочник 10-значных кодов с путём — CSV `export_codes.py` (UTF-8, «;», CRLF), имя с датой тарифа; заголовки `X-Tariff-As-Of`, `X-Content-SHA256`, `X-Codes`. Файл сверяется с базой (дата тарифа, дата сборки, число кодов): нет или не сошлось — 503. После пересборки базы — `python export_codes.py`, `exports/` кладётся в образ |
 | `GET`  | `/api/codes/{code}` | Карточка кода (2–10 цифр): `status` current / retired / not_leaf, `in_tariff`, `name`, `path` (уровни), `hierarchy`, `duty_rate`, версия. Нет кода — 404, не тот формат — 400 |
 | `GET`  | `/api/models` | `{model}` — какая модель отвечает (задаётся только на сервере) |
 | `GET`  | `/health` | 200 если store загружен, иначе 503 |

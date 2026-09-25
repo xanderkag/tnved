@@ -13,7 +13,7 @@
   - **Чат** — свободный диалог с авто-финализацией.
 - **Свежие коды + пошлины** — слияние [infoculture/opencustoms](https://github.com/infoculture/opencustoms) (иерархия) + [TWS.BY](https://www.tws.by/tws/tnved/download/excel) (актуальные листья + ставка пошлины, обновляется ежедневно). 31 622 кода в SQLite, 13 285 со ставкой.
 - **Векторный поиск** через `intfloat/multilingual-e5-base` + FAISS, фильтрация по группе.
-- **Два провайдера LLM из коробки**: OpenAI и Anthropic (Claude). Конфиг — через шестерёнку в шапке UI (хранится в localStorage и шлётся заголовками `X-LLM-*` per-request) либо через env как fallback.
+- **Только наша модель**: OpenAI-совместимый vLLM во внутренней сети, задаётся на сервере (`LLM_BASE_URL`, `LLM_MODEL`). Внешних провайдеров и выбора модели из UI нет — описания товаров наружу не уходят.
 - **JSON-режим LLM** для стабильного парсинга.
 
 ## Структура
@@ -40,7 +40,7 @@ TECH_DEBT.md        # известные ограничения, B-беклог 
 
 ```bash
 cp .env.example .env
-nano .env   # OPENAI_API_KEY, OPENAI_BASE_URL (если внутренний), HOST_PORT, COMPOSE_PROJECT_NAME
+nano .env   # LLM_BASE_URL, LLM_MODEL (наша модель), HOST_PORT, COMPOSE_PROJECT_NAME
 docker compose up -d --build
 ```
 
@@ -58,7 +58,8 @@ venv/Scripts/python fetch_tnved.py     # качает CSV+xlsx в data/raw/
 venv/Scripts/python parse_tnved.py     # → data/tnved.db
 venv/Scripts/python build_index.py     # → data/tnved.faiss + tnved_meta.json (5–10 мин)
 
-set OPENAI_API_KEY=sk-...
+set LLM_BASE_URL=http://10.10.33.10:8100/v1
+set LLM_MODEL=<имя из GET /v1/models>
 venv/Scripts/python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
@@ -74,18 +75,18 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 
 ## Конфигурация LLM
 
-**Два пути:**
+Только наша модель на нашем железе (решение 25.09.2026): описания товаров не уходят во внешние сервисы.
 
-1. **UI (приоритет):** шестерёнка ⚙ в шапке → выбор провайдера, модели, ввод ключа (и опционально base URL для OpenAI). Сохраняется в `localStorage` и подмешивается заголовками `X-LLM-Provider` / `X-LLM-API-Key` / `X-LLM-Model` / `X-LLM-Base-URL` в каждый запрос. Сервер ничего не сохраняет.
-2. **Env (fallback):** если в заголовках поля пусты, классификатор подтягивает их из env (см. таблицу ниже). Удобно для дев-стенда / Docker-демо без UI-настройки.
+- Модель задаётся **только на сервере**, через env. Значений по умолчанию нет: без `LLM_BASE_URL` и `LLM_MODEL` сервис не стартует. Адрес, который резолвится вне внутренней сети, — тоже отказ при старте. Та же проверка — для `EMBEDDINGS_BASE_URL`.
+- Запрос с заголовками `X-LLM-*` получает **400**: адрес, ключ и модель из запроса не принимаются.
+- Модель не ответила — **503** с причиной; на другую модель сервис не переключается.
+- `LLM_PROVIDER`, `OPENAI_*`, `ANTHROPIC_*` больше не читаются; если заданы — сервис не стартует, чтобы не было иллюзии, что они работают.
 
 | Переменная | Дефолт | Что |
 |---|---|---|
-| `LLM_PROVIDER` | `openai` | `openai` или `anthropic` |
-| `OPENAI_API_KEY` | — | для OpenAI / OpenAI-совместимых |
-| `ANTHROPIC_API_KEY` | — | для Anthropic |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | внутренний vLLM/шлюз — указать сюда |
-| `LLM_MODEL` | `gpt-4o-mini` (или `claude-haiku-4-5` для Anthropic) | имя модели |
+| `LLM_BASE_URL` | — (обязательна) | OpenAI-совместимый адрес vLLM во внутренней сети, например `http://10.10.33.10:8100/v1` |
+| `LLM_MODEL` | — (обязательна) | имя модели, как его отдаёт `GET <LLM_BASE_URL>/models` |
+| `LLM_API_KEY` | пусто | если vLLM запущен с `--api-key` |
 | `LLM_TIMEOUT` | `60` | сек, верхний таймаут на LLM-вызов |
 | `BATCH_CONCURRENCY` | `5` | параллельных LLM-запросов в одном батче |
 | `BATCH_MAX_ROWS` | `500` | максимум строк в xlsx |
@@ -106,7 +107,7 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 | `POST` | `/api/chat/start` | Новый чат |
 | `POST` | `/api/chat/{id}/message` | Реплика в чат |
 | `GET`  | `/api/chat/{id}` | Снимок чата |
-| `GET`  | `/api/models` | `{models:[...], default:...}` |
+| `GET`  | `/api/models` | `{model}` — какая модель отвечает (задаётся только на сервере) |
 | `GET`  | `/health` | 200 если store загружен, иначе 503 |
 
 ## Лицензия

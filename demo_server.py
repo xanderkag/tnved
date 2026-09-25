@@ -94,22 +94,7 @@ class FinalizeRequest(BaseModel):
 
 @app.get("/api/models")
 async def models():
-    """Демо-сервер делает вид, что поддерживает оба провайдера. UI покажет переключение."""
-    return {
-        "default": {"provider": "openai", "model": "demo-model"},
-        "providers": {
-            "openai": {
-                "label": "OpenAI",
-                "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
-                "needs_base_url": True,
-            },
-            "anthropic": {
-                "label": "Anthropic",
-                "models": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"],
-                "needs_base_url": False,
-            },
-        },
-    }
+    return {"model": "demo-model"}
 
 
 @app.post("/api/classify/start")

@@ -18,7 +18,6 @@
             <div class="logo">
                 <span class="logo-icon">⚡</span>
                 <span class="logo-text">ТН ВЭД <span class="logo-dim">Ассистент</span></span>
-                <button id="settings-btn" class="settings-btn" title="Настройки LLM" aria-label="Настройки LLM">⚙</button>
             </div>
             <p class="subtitle">Профессиональный определитель кода Товарной номенклатуры ВЭД ЕАЭС</p>
         </header>
@@ -239,60 +238,6 @@
         <footer>
             <span id="status"></span>
         </footer>
-    </div>
-
-    <!-- ═══════════ МОДАЛКА: НАСТРОЙКИ LLM ═══════════ -->
-    <div id="settings-modal" class="modal" hidden>
-        <div class="modal-backdrop" data-close></div>
-        <div class="modal-card">
-            <div class="modal-head">
-                <h2>Настройки LLM</h2>
-                <button class="modal-close" data-close aria-label="Закрыть">×</button>
-            </div>
-            <p class="hint hint-secure">
-                <span class="hint-icon" aria-hidden="true">🔒</span>
-                Ключ остаётся в браузере (localStorage). На сервер уходит заголовком только для конкретного запроса, нигде не сохраняется.
-            </p>
-
-            <div class="form-grid">
-                <div class="field">
-                    <label for="settings-provider">Провайдер</label>
-                    <select id="settings-provider">
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic (Claude)</option>
-                    </select>
-                </div>
-
-                <div class="field">
-                    <label for="settings-model">Модель</label>
-                    <select id="settings-model"></select>
-                </div>
-
-                <div class="field full">
-                    <label for="settings-api-key">API-ключ</label>
-                    <div class="input-with-toggle">
-                        <input id="settings-api-key" type="password"
-                            autocomplete="off" placeholder="sk-... / sk-ant-...">
-                        <button type="button" id="settings-key-toggle" class="input-toggle"
-                                aria-label="Показать/скрыть ключ" title="Показать/скрыть">👁</button>
-                    </div>
-                </div>
-
-                <details class="field full advanced-details" id="settings-advanced">
-                    <summary>Дополнительно</summary>
-                    <div class="field" id="settings-base-url-field">
-                        <label for="settings-base-url">Base URL <span class="hint-inline">для vLLM / собственного прокси (OpenAI-совместимого)</span></label>
-                        <input id="settings-base-url" type="text" autocomplete="off"
-                            placeholder="https://api.openai.com/v1">
-                    </div>
-                </details>
-            </div>
-
-            <div class="row row-spread modal-actions">
-                <button id="settings-clear-btn" class="ghost">Сбросить</button>
-                <button id="settings-save-btn" class="primary" disabled>Сохранить</button>
-            </div>
-        </div>
     </div>
 
     <script src="/static/app.js"></script>

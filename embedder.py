@@ -33,6 +33,8 @@ from typing import Protocol
 
 import numpy as np
 
+from netcheck import require_internal_url
+
 DEFAULT_API_MODEL = "bge-m3"
 DEFAULT_LOCAL_MODEL = "intfloat/multilingual-e5-base"
 
@@ -67,6 +69,8 @@ class ApiEmbedder:
             raise RuntimeError(
                 "EMBEDDINGS_BASE_URL не задан — не знаю, куда обращаться за векторами."
             )
+        # Сюда уходит описание товара (вектор запроса) — только во внутреннюю сеть.
+        base_url = require_internal_url(base_url, "EMBEDDINGS_BASE_URL")
         self.model = os.environ.get("EMBEDDINGS_MODEL", DEFAULT_API_MODEL)
         self.batch = int(os.environ.get("EMBEDDINGS_BATCH", "64"))
         self.name = f"api:{self.model}"

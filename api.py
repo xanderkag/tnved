@@ -16,19 +16,25 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
 
-from classifier import LLMConfig, classify, merge_qa, normalize_input, resolve_config, triage
+from classifier import (
+    LLMConfig,
+    LLMUnavailable,
+    classify,
+    llm_config_from_env,
+    merge_qa,
+    normalize_input,
+    triage,
+)
 from tnved_data import TNVEDStore
 
 BASE = Path(__file__).parent
 STATIC_DIR = BASE / "static"
-DEFAULT_LLM = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-DEFAULT_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "5"))
 BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
 CHAT_MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "6"))
@@ -53,6 +59,7 @@ STATIC_VER = _compute_static_version()
 # ─── глобальные ресурсы ───────────────────────────────────────────────────────
 
 class App:
+    llm: LLMConfig | None = None
     store: TNVEDStore | None = None
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
@@ -93,6 +100,9 @@ async def _cleanup_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Без нашей модели не стартуем: исключение отсюда останавливает uvicorn.
+    state.llm = llm_config_from_env()
+    print(f"Модель: {state.llm.model} @ {state.llm.base_url}")
     print("Загружаем ресурсы ТН ВЭД...")
     try:
         state.store = TNVEDStore()
@@ -115,6 +125,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="ТН ВЭД Ассистент")
+
+
+@app.middleware("http")
+async def refuse_llm_headers(request: Request, call_next):
+    """Раньше заголовки X-LLM-* меняли адрес, ключ и модель на лету — так описание
+    могло уйти во внешний сервис, а серверный ключ — на чужой адрес. Модель теперь
+    задаётся только на сервере, и такой запрос — отказ, а не тихое игнорирование."""
+    sent = sorted(k for k, v in request.headers.items() if k.startswith("x-llm-") and v.strip())
+    if sent:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Заголовки {', '.join(sent)} не принимаются: "
+                               "модель задаётся только на сервере."},
+        )
+    return await call_next(request)
+
+
+@app.exception_handler(LLMUnavailable)
+async def llm_unavailable(request: Request, exc: LLMUnavailable):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 def _require_store() -> TNVEDStore:
@@ -143,19 +173,10 @@ class FinalizeRequest(BaseModel):
     answers: list[AnswerItem] = []
 
 
-def _llm_from_headers(
-    provider: Optional[str],
-    api_key: Optional[str],
-    model: Optional[str],
-    base_url: Optional[str],
-) -> LLMConfig:
-    """Собирает LLMConfig из заголовков X-LLM-*. Пустые поля заполнит resolve_config из env."""
-    return LLMConfig(
-        provider=(provider or "openai"),
-        api_key=(api_key or ""),
-        base_url=(base_url or None),
-        model=(model or ""),
-    )
+def _llm() -> LLMConfig:
+    """Наша модель — из env сервера, проверена при старте (llm_config_from_env)."""
+    assert state.llm is not None, "lifespan не даёт стартовать без модели"
+    return state.llm
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
@@ -163,13 +184,9 @@ def _llm_from_headers(
 @app.post("/api/classify/start")
 async def classify_start(
     req: StartRequest,
-    x_llm_provider: Optional[str] = Header(None),
-    x_llm_api_key: Optional[str] = Header(None),
-    x_llm_model: Optional[str] = Header(None),
-    x_llm_base_url: Optional[str] = Header(None),
 ):
     store = _require_store()
-    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
+    cfg = _llm()
     description = normalize_input(req.description, req.fields)
     if not description:
         raise HTTPException(400, "Пустое описание товара")
@@ -187,7 +204,6 @@ async def classify_start(
         "created_at": datetime.utcnow().isoformat(),
         "mode": req.mode,
         "description": description,
-        "llm_provider": cfg.provider,
         "llm_model": cfg.model,
         "triage": triage_result,
     }
@@ -208,13 +224,9 @@ async def classify_start(
 @app.post("/api/classify/finalize")
 async def classify_finalize(
     req: FinalizeRequest,
-    x_llm_provider: Optional[str] = Header(None),
-    x_llm_api_key: Optional[str] = Header(None),
-    x_llm_model: Optional[str] = Header(None),
-    x_llm_base_url: Optional[str] = Header(None),
 ):
     store = _require_store()
-    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
+    cfg = _llm()
     session = state.sessions.get(req.session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
@@ -258,29 +270,8 @@ async def classify_get(session_id: str):
 
 @app.get("/api/models")
 async def models():
-    """
-    Подсказки для UI настроек: имена моделей по каждому провайдеру + дефолт из env.
-    Реальная модель — что юзер выберет в шестерёнке (UI) или что лежит в env как fallback.
-    """
-    return {
-        "default": {"provider": DEFAULT_PROVIDER, "model": DEFAULT_LLM},
-        "providers": {
-            "openai": {
-                "label": "OpenAI",
-                "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-                "needs_base_url": True,
-            },
-            "anthropic": {
-                "label": "Anthropic",
-                "models": [
-                    "claude-haiku-4-5",
-                    "claude-sonnet-4-6",
-                    "claude-opus-4-7",
-                ],
-                "needs_base_url": False,
-            },
-        },
-    }
+    """Какая модель отвечает. Выбора нет: модель задаётся только на сервере."""
+    return {"model": _llm().model}
 
 
 @app.get("/health")
@@ -291,6 +282,7 @@ async def health():
     return {
         "status": "ok",
         "mode": "lite" if state.store.lite else "full",
+        "llm_model": _llm().model,
         "vectors": state.store.index_ntotal,
         "groups": len(state.store.groups),
         "static_version": STATIC_VER,
@@ -413,12 +405,8 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
 @app.post("/api/chat/start")
 async def chat_start(
     req: ChatStartRequest,
-    x_llm_provider: Optional[str] = Header(None),
-    x_llm_api_key: Optional[str] = Header(None),
-    x_llm_model: Optional[str] = Header(None),
-    x_llm_base_url: Optional[str] = Header(None),
 ):
-    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
+    cfg = _llm()
     chat_id = uuid.uuid4().hex[:12]
     state.chats[chat_id] = {
         "id": chat_id,
@@ -426,7 +414,6 @@ async def chat_start(
         "messages": [],
         "description": "",
         "phase": "gathering",
-        "llm_provider": cfg.provider,
         "llm_model": cfg.model,
         "triage": None,
         "result": None,
@@ -452,12 +439,8 @@ async def chat_start(
 async def chat_message(
     chat_id: str,
     req: ChatMessageRequest,
-    x_llm_provider: Optional[str] = Header(None),
-    x_llm_api_key: Optional[str] = Header(None),
-    x_llm_model: Optional[str] = Header(None),
-    x_llm_base_url: Optional[str] = Header(None),
 ):
-    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
+    cfg = _llm()
     chat = state.chats.get(chat_id)
     if not chat:
         raise HTTPException(404, "Чат не найден")
@@ -554,13 +537,9 @@ async def _run_batch(job_id: str, descriptions: list[str], cfg: LLMConfig) -> No
 @app.post("/api/classify/batch")
 async def classify_batch_start(
     file: UploadFile = File(...),
-    x_llm_provider: Optional[str] = Header(None),
-    x_llm_api_key: Optional[str] = Header(None),
-    x_llm_model: Optional[str] = Header(None),
-    x_llm_base_url: Optional[str] = Header(None),
 ):
     _require_store()
-    cfg = _llm_from_headers(x_llm_provider, x_llm_api_key, x_llm_model, x_llm_base_url)
+    cfg = _llm()
     fname = (file.filename or "").lower()
     if not fname.endswith(".xlsx"):
         raise HTTPException(400, "Ожидается .xlsx (Excel)")
@@ -580,7 +559,6 @@ async def classify_batch_start(
     if len(descriptions) > BATCH_MAX_ROWS:
         raise HTTPException(400, f"Слишком много строк: {len(descriptions)} > лимит {BATCH_MAX_ROWS}")
 
-    resolved_cfg = resolve_config(cfg)
     job_id = uuid.uuid4().hex[:12]
     state.batch_jobs[job_id] = {
         "id": job_id,
@@ -590,8 +568,7 @@ async def classify_batch_start(
         "status": "running",
         "started_at": datetime.utcnow().isoformat(),
         "finished_at": None,
-        "llm_provider": resolved_cfg.provider,
-        "llm_model": resolved_cfg.model,
+        "llm_model": cfg.model,
         "results": [None] * len(descriptions),
         "errors": [],
     }

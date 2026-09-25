@@ -4,10 +4,9 @@
 Stage 1 (triage): по описанию определяет вероятную группу + что не хватает.
 Stage 2 (classify): из кандидатов внутри группы выбирает финальный код + альтернативы.
 
-LLM возвращает строгий JSON (OpenAI: response_format=json_object;
-Anthropic: эмулируется через системный промпт + parse). Конфиг приходит
-per-request из заголовков X-LLM-* (см. api.py), либо подтягивается из env
-как fallback.
+LLM — только наша модель на нашем железе: OpenAI-совместимый адрес (vLLM)
+из env сервера, ответ — строгий JSON (response_format=json_object). Модель
+задаётся только на сервере: ни значений по умолчанию, ни выбора из запроса.
 """
 
 from __future__ import annotations
@@ -15,86 +14,59 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Literal, Optional
 
-from anthropic import AsyncAnthropic
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from openai import APIError, AsyncOpenAI
+from pydantic import BaseModel
 
 from gri import GRI_HINT_FOR_PROMPT, gri_text
+from netcheck import require_internal_url
 from tnved_data import TNVEDStore
 
 
 # ─── конфиг LLM ───────────────────────────────────────────────────────────────
 
 class LLMConfig(BaseModel):
-    """Конфигурация LLM-провайдера. Приходит из UI (заголовки X-LLM-*) или env."""
-    provider: Literal["openai", "anthropic"] = "openai"
+    """Наша модель: OpenAI-совместимый адрес во внутренней сети и имя модели."""
+    base_url: str
+    model: str
     api_key: str = ""
-    base_url: Optional[str] = None
-    model: str = ""
 
 
-_DEFAULT_MODEL_BY_PROVIDER = {
-    "openai": "gpt-4o-mini",
-    "anthropic": "claude-haiku-4-5",
-}
+# По этим переменным раньше ходили в OpenAI / Anthropic. Если они заданы,
+# человек думает, что они работают, — поэтому не молчим, а не стартуем.
+_RETIRED_ENV = ("LLM_PROVIDER", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY")
 
 
-def resolve_config(cfg: Optional[LLMConfig]) -> LLMConfig:
-    """Заполняет пустые поля cfg из env. Используем как fallback в любом эндпоинте."""
-    if cfg is None:
-        cfg = LLMConfig()
-
-    provider = cfg.provider or "openai"
-    api_key = cfg.api_key or os.environ.get(
-        "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY",
-        "",
+def llm_config_from_env() -> LLMConfig:
+    """Модель из env сервера. Нет адреса во внутренней сети или имени модели — RuntimeError."""
+    retired = [name for name in _RETIRED_ENV if os.environ.get(name, "").strip()]
+    if retired:
+        raise RuntimeError(
+            f"Переменные {', '.join(retired)} больше не читаются: внешние провайдеры отключены. "
+            "Уберите их; модель задаётся через LLM_BASE_URL, LLM_MODEL и LLM_API_KEY."
+        )
+    base_url = os.environ.get("LLM_BASE_URL", "").strip()
+    model = os.environ.get("LLM_MODEL", "").strip()
+    if not base_url or not model:
+        raise RuntimeError(
+            "Модель не задана: нужны LLM_BASE_URL (адрес нашей модели, например "
+            "http://10.10.33.10:8100/v1) и LLM_MODEL. Значения по умолчанию нет намеренно: "
+            "без нашей модели сервис не стартует."
+        )
+    return LLMConfig(
+        base_url=require_internal_url(base_url, "LLM_BASE_URL"),
+        model=model,
+        api_key=os.environ.get("LLM_API_KEY", "").strip(),
     )
-    base_url = cfg.base_url or (os.environ.get("OPENAI_BASE_URL") if provider == "openai" else None)
-    model = cfg.model or os.environ.get("LLM_MODEL", _DEFAULT_MODEL_BY_PROVIDER[provider])
-
-    return LLMConfig(provider=provider, api_key=api_key, base_url=base_url or None, model=model)
 
 
-# ─── вызовы провайдеров ───────────────────────────────────────────────────────
+class LLMUnavailable(RuntimeError):
+    """Наша модель не ответила. На другую модель не переключаемся — это отказ."""
+
+
+# ─── вызов модели ─────────────────────────────────────────────────────────────
 
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
-
-
-async def _call_openai_json(cfg: LLMConfig, system: str, user: str) -> dict:
-    """OpenAI / OpenAI-совместимый: используем нативный response_format=json_object."""
-    client = AsyncOpenAI(
-        api_key=cfg.api_key or "EMPTY",
-        base_url=cfg.base_url,
-        timeout=LLM_TIMEOUT,
-    )
-    resp = await client.chat.completions.create(
-        model=cfg.model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-    raw = resp.choices[0].message.content or "{}"
-    return _parse_json_loose(raw)
-
-
-async def _call_anthropic_json(cfg: LLMConfig, system: str, user: str) -> dict:
-    """Anthropic: нет нативного JSON-mode → жёстко требуем формат в system."""
-    client = AsyncAnthropic(api_key=cfg.api_key, timeout=LLM_TIMEOUT)
-    sys = system + "\n\nВАЖНО: верни ТОЛЬКО валидный JSON-объект, без markdown-обрамления, без преамбулы и пояснений."
-    resp = await client.messages.create(
-        model=cfg.model,
-        max_tokens=2048,
-        system=sys,
-        messages=[{"role": "user", "content": user}],
-        temperature=0.1,
-    )
-    raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-    return _parse_json_loose(raw)
 
 
 def _parse_json_loose(raw: str) -> dict:
@@ -109,16 +81,27 @@ def _parse_json_loose(raw: str) -> dict:
         raise
 
 
-async def llm_json(cfg: Optional[LLMConfig], system: str, user: str) -> dict:
-    cfg = resolve_config(cfg)
-    if not cfg.api_key:
-        raise ValueError(
-            "LLM API-ключ не задан. Открой шестерёнку справа сверху и введи ключ "
-            "(OpenAI или Anthropic), либо задай env OPENAI_API_KEY / ANTHROPIC_API_KEY."
+async def llm_json(cfg: LLMConfig, system: str, user: str) -> dict:
+    """Запрос к нашей модели с response_format=json_object."""
+    client = AsyncOpenAI(
+        api_key=cfg.api_key or "EMPTY",
+        base_url=cfg.base_url,
+        timeout=LLM_TIMEOUT,
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=cfg.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
         )
-    if cfg.provider == "anthropic":
-        return await _call_anthropic_json(cfg, system, user)
-    return await _call_openai_json(cfg, system, user)
+    except APIError as exc:
+        raise LLMUnavailable(f"Модель {cfg.model} не ответила: {exc}") from exc
+    raw = resp.choices[0].message.content or "{}"
+    return _parse_json_loose(raw)
 
 # ─── промпты ──────────────────────────────────────────────────────────────────
 
@@ -212,7 +195,7 @@ def merge_qa(description: str, answers: list[dict]) -> str:
 async def triage(
     store: TNVEDStore,
     description: str,
-    cfg: Optional[LLMConfig] = None,
+    cfg: LLMConfig,
 ) -> dict:
     """Определяет группу и набор уточняющих вопросов."""
     user = (
@@ -246,7 +229,7 @@ async def classify(
     store: TNVEDStore,
     description: str,
     group_code: str,
-    cfg: Optional[LLMConfig] = None,
+    cfg: LLMConfig,
     top_k: int = 12,
 ) -> dict:
     """Финальная классификация: ищем кандидатов в группе, LLM выбирает код."""

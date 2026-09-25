@@ -15,11 +15,11 @@ services:
     environment:
       TZ: Europe/Moscow
       LITE_MODE: ${LITE_MODE:-0}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      # Только наша модель: без адреса и имени compose не поднимет стек,
+      # а сервис не стартует (адрес вне внутренней сети — тоже отказ).
+      LLM_BASE_URL: ${LLM_BASE_URL:?задайте LLM_BASE_URL — адрес нашей модели}
+      LLM_MODEL: ${LLM_MODEL:?задайте LLM_MODEL — имя нашей модели}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s

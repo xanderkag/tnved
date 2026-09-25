@@ -239,21 +239,25 @@ async def classify_finalize(
     if not session:
         raise HTTPException(404, "Сессия не найдена")
 
-    description = merge_qa(
-        session["description"],
-        [a.model_dump() for a in req.answers],
-    )
-    group_code = session["triage"].get("group_code", "")
+    answers = [a.model_dump() for a in req.answers if a.answer.strip()]
+    description = merge_qa(session["description"], answers)
+    triage_res = session["triage"]
+    if answers:
+        # Группа и позиции — заново по описанию с ответами, как в чате: описание, по которому
+        # спрашивали, обычно слишком короткое («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
+        # Вопросы второго triage не задаются.
+        triage_res = await triage(store, description, cfg)
+        session["triage_final"] = triage_res
 
     result = await classify(
         store,
         description=description,
-        group_code=group_code,
+        group_code=triage_res.get("group_code", ""),
         cfg=cfg,
-        headings=session["triage"].get("headings"),
+        headings=triage_res.get("headings"),
     )
 
-    session["answers"] = [a.model_dump() for a in req.answers]
+    session["answers"] = answers
     session["full_description"] = description
     session["result"] = result
     session["finalized_at"] = datetime.utcnow().isoformat()

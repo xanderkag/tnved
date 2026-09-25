@@ -41,7 +41,6 @@ BASE = Path(__file__).parent
 STATIC_DIR = BASE / "static"
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "5"))
 BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
-CHAT_MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "6"))
 MAX_DESCRIPTION_LEN = int(os.environ.get("MAX_DESCRIPTION_LEN", "5000"))
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_HOURS", "24")) * 3600
 CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "600"))
@@ -443,53 +442,60 @@ def _chat_format_questions(triage_res: dict) -> str:
         lines.append("Уточню:")
         for q in questions[:3]:
             lines.append(f"- {q.get('question', '')}")
+        lines.append("Ответьте одним сообщением — после него подберу код.")
     else:
         lines.append("Пришлите больше деталей — состав, назначение, форму, технические параметры.")
     return "\n".join(lines)
 
 
 async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
+    """Ход пользователя в чате. Как «один товар»: triage — только на первой реплике,
+    вторая — ответ на вопросы, и сразу classify с группой и позициями первого triage.
+    Не больше одного triage и одного classify на чат (B3: раньше triage шёл на каждом ходе
+    по всему накопленному описанию — токены росли квадратично).
+    """
     store = _require_store()
     chat = state.chats[chat_id]
     chat["messages"].append({"role": "user", "content": text})
-    chat["description"] = (chat["description"] + "\n" + text).strip() if chat["description"] else text
 
-    triage_res = await triage(store, chat["description"], cfg)
-
-    user_turns = sum(1 for m in chat["messages"] if m["role"] == "user")
-    completeness = triage_res.get("completeness", "low")
-    questions = triage_res.get("questions", [])
-
-    finalize = (
-        completeness == "high"
-        or not questions
-        or user_turns >= CHAT_MAX_TURNS
-    )
-
-    if finalize:
-        result = await classify(
-            store,
-            description=chat["description"],
-            group_code=triage_res.get("group_code", ""),
-            cfg=cfg,
-            headings=triage_res.get("headings"),
-        )
+    # Модель не ответила (503) — реплика остаётся в чате; повтор дописывается к ней, а не заменяет
+    if chat["triage"] is None:
+        chat["description"] = f"{chat['description']}\n{text}".strip()
+        triage_res = await triage(store, chat["description"], cfg)
         chat["triage"] = triage_res
-        chat["result"] = result
-        chat["phase"] = "finalized"
-        chat["messages"].append({
-            "role": "assistant",
-            "content": _chat_format_finalization(triage_res, result),
-        })
+        if triage_res.get("completeness", "low") != "high" and triage_res.get("questions"):
+            chat["messages"].append({
+                "role": "assistant",
+                "content": _chat_format_questions(triage_res),
+            })
+            return _chat_snapshot(chat)
+        description = chat["description"]
     else:
-        chat["triage"] = triage_res
-        chat["messages"].append({
-            "role": "assistant",
-            "content": _chat_format_questions(triage_res),
-        })
+        triage_res = chat["triage"]
+        asked = [q.get("question", "") for q in (triage_res.get("questions") or [])[:3]]
+        chat["answer"] = f"{chat.get('answer', '')}\n{text}".strip()
+        description = merge_qa(chat["description"], [{"question": "; ".join(q for q in asked if q), "answer": chat["answer"]}])
 
+    result = await classify(
+        store,
+        description=description,
+        group_code=triage_res.get("group_code", ""),
+        cfg=cfg,
+        headings=triage_res.get("headings"),
+    )
+    chat["full_description"] = description
+    chat["result"] = result
+    chat["phase"] = "finalized"
+    chat["messages"].append({
+        "role": "assistant",
+        "content": _chat_format_finalization(triage_res, result),
+    })
+    return _chat_snapshot(chat)
+
+
+def _chat_snapshot(chat: dict) -> dict:
     return {
-        "chat_id": chat_id,
+        "chat_id": chat["id"],
         "phase": chat["phase"],
         "messages": chat["messages"],
         "result": chat.get("result"),

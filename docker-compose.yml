@@ -22,6 +22,7 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-60}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      LLM_SCHEMA_MAX_TOKENS: ${LLM_SCHEMA_MAX_TOKENS:-1400}
       # Векторы запросов — bge-m3 на нашем сервере, той же моделью, что собран
       # индекс (паспорт data/tnved_index_info.json). В полном режиме адрес
       # обязателен: без него сервис в degraded, /health — 503. Здесь без `:?` —

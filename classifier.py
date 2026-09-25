@@ -73,6 +73,13 @@ LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
 # Потолок ответа. Без него зациклившаяся модель пишет до конца контекста (32k токенов) —
 # минуты вместо секунд. Обрезанный ответ — отказ, а не «что успело».
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
+# Со схемой длину строк и списков держит vLLM (maxLength, maxItems): ответ classify, заполненный
+# до всех потолков, — 1 047 токенов на qwen36 (замер /tokenize). Не держит он только пробелы и
+# переводы строк между элементами JSON, а запретить их запросом vLLM 0.24 не даёт
+# (disable_any_whitespace, whitespace_pattern — без эффекта). Модель изредка в них зацикливается:
+# пилот c06d29f — 2048 токенов за 42 с, повтор того же запроса — 654. Потолок со схемой ниже,
+# обрыв — один повтор.
+LLM_SCHEMA_MAX_TOKENS = int(os.environ.get("LLM_SCHEMA_MAX_TOKENS", "1400"))
 
 
 def _parse_json_loose(raw: str) -> dict:
@@ -92,7 +99,8 @@ async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None =
     её vLLM держит при генерации, в том числе maxLength строк — жёсткий потолок длины.
 
     Любой непригодный ответ — отказ (LLMUnavailable → 503), а не пустой результат:
-    таймаут, ошибка сервера, ответ обрезан по LLM_MAX_TOKENS, не JSON-объект.
+    таймаут, ошибка сервера, ответ обрезан по LLM_MAX_TOKENS, не JSON-объект. Исключение —
+    обрыв ответа со схемой: это зацикливание на пробелах, его лечит один повтор.
     """
     client = AsyncOpenAI(
         api_key=cfg.api_key or "EMPTY",
@@ -102,6 +110,27 @@ async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None =
         # на и без того занятую модель. Отказ виден сразу.
         max_retries=0,
     )
+    max_tokens = LLM_SCHEMA_MAX_TOKENS if schema else LLM_MAX_TOKENS
+    for attempt in (1, 2):
+        choice = await _llm_call(client, cfg, system, user, schema, max_tokens)
+        if choice.finish_reason != "length":
+            break
+        tail = choice.message.content or ""
+        print(f"[llm] {cfg.model}: обрыв на {max_tokens} токенах (попытка {attempt}); пробелов в ответе "
+              f"{sum(ch.isspace() for ch in tail)} из {len(tail)}, хвост {tail[-40:]!r}")
+        if not schema or attempt == 2:
+            raise LLMUnavailable(f"Модель {cfg.model}: ответ обрезан на {max_tokens} токенах "
+                                 f"({'LLM_SCHEMA_MAX_TOKENS' if schema else 'LLM_MAX_TOKENS'})")
+    try:
+        result = _parse_json_loose(choice.message.content or "")
+    except json.JSONDecodeError as exc:
+        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON-объект, а {type(result).__name__}")
+    return result
+
+
+async def _llm_call(client, cfg: LLMConfig, system: str, user: str, schema: dict | None, max_tokens: int):
     t0 = time.perf_counter()
     try:
         resp = await client.chat.completions.create(
@@ -113,7 +142,7 @@ async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None =
             response_format=({"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
                              if schema else {"type": "json_object"}),
             temperature=0.1,
-            max_tokens=LLM_MAX_TOKENS,
+            max_tokens=max_tokens,
             # Qwen3.x — без «размышлений», ответ сразу JSON. Иначе при reasoning-парсере
             # на сервере модель думает до JSON тысячи токенов и не укладывается в таймаут.
             # Шаблоны других моделей лишний ключ игнорируют.
@@ -127,15 +156,8 @@ async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None =
     print(f"[llm] {cfg.model}: {time.perf_counter() - t0:.1f}s, "
           f"prompt={usage.prompt_tokens if usage else '?'} "
           f"compl={usage.completion_tokens if usage else '?'}, finish={choice.finish_reason}")
-    if choice.finish_reason == "length":
-        raise LLMUnavailable(f"Модель {cfg.model}: ответ обрезан на {LLM_MAX_TOKENS} токенах (LLM_MAX_TOKENS)")
-    try:
-        result = _parse_json_loose(choice.message.content or "")
-    except json.JSONDecodeError as exc:
-        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON: {exc}") from exc
-    if not isinstance(result, dict):
-        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON-объект, а {type(result).__name__}")
-    return result
+    return choice
+
 
 # ─── промпты ──────────────────────────────────────────────────────────────────
 

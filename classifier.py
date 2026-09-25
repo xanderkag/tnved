@@ -397,18 +397,122 @@ PATH_SEP = " → "
 PROMPT_LEVEL_LIMIT = 150
 
 
+def _path_levels(item: dict) -> list[str]:
+    return [s.strip() for s in (item.get("full_path") or "").split(PATH_SEP) if s.strip()]
+
+
+def _cut_level(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+
 def _path_for_prompt(item: dict, group_code: str) -> str:
     """Путь кандидата для модели: «позиция → … → с шестигранной головкой → из
     коррозионностойкой стали → прочие». Различает кандидатов хвост пути, поэтому
     он идёт целиком; группа уже названа строкой «ОПРЕДЕЛЁННАЯ ГРУППА», а длинные
     уровни (наименования позиций — до 250 знаков) подрезаем.
     """
-    segs = [s.strip() for s in (item.get("full_path") or "").split(PATH_SEP) if s.strip()]
+    segs = _path_levels(item)
     if len(segs) > 1 and item["code"][:2] == group_code:
         segs = segs[1:]
-    segs = [s if len(s) <= PROMPT_LEVEL_LIMIT else s[:PROMPT_LEVEL_LIMIT].rsplit(" ", 1)[0] + "…"
-            for s in segs]
-    return PATH_SEP.join(segs) or item["description"]
+    return PATH_SEP.join(_cut_level(s, PROMPT_LEVEL_LIMIT) for s in segs) or item["description"]
+
+
+# ─── хвост кода внутри субпозиции ─────────────────────────────────────────────
+
+# Кандидаты classify — ближайшие коды группы и по коду на каждую подпозицию названных позиций,
+# поэтому соседей выбранного кода модель может не видеть: у корпуса сервера из 8473 30 был виден
+# только 8473302008 (электронные модули), а 8473308000 (прочие части) — нет, у вентилятора из
+# 8414 59 — только центробежные, у блока питания из 8504 40 — только инверторы (пилот-10, Д4).
+# Тогда код уточняется вторым вызовом по всем кодам подпозиции: в 99 % подпозиций их до 18,
+# в самой большой — 72, берём ближайшие TAIL_MAX. Тексты кодов здесь почти не режем: у
+# 8473302002 ключ «звуковая карта» — в конце текста из 371 знака.
+TAIL_MAX = 30
+TAIL_LEVEL_LIMIT = 400
+
+TAIL_SYSTEM = """Ты эксперт-классификатор ТН ВЭД ЕАЭС.
+
+Товар уже отнесён к субпозиции (первые 6 знаков кода). Выбери в ней ОДИН 10-значный код.
+Сравни описание товара с текстом каждого кода субпозиции и возьми тот, под который товар подходит;
+«прочие» — только если товар не подходит ни под один более конкретный код. Примечания, если даны, применяй.
+Код бери только из списка.
+
+Отвечай СТРОГО в формате JSON:
+{"code": "XXXXXXXXXX", "reasoning": "1–2 предложения: почему этот код, а не соседние"}"""
+
+
+def _tail_prompt(description: str, code: str, siblings: list[dict]) -> str:
+    """Общая часть пути — строкой субпозиции (без группы), у кодов — только то, чем они различаются."""
+    paths = [_path_levels(c) for c in siblings]
+    common = 0
+    for level in zip(*paths):
+        if any(s != level[0] for s in level):
+            break
+        common += 1
+    common = max(0, min(common, min(len(p) for p in paths) - 1))  # у каждого кода остаётся хоть уровень
+    head = PATH_SEP.join(_cut_level(s, PROMPT_LEVEL_LIMIT) for s in paths[0][1:common])
+    lines = []
+    for i, (c, p) in enumerate(zip(siblings, paths)):
+        tail = PATH_SEP.join(_cut_level(s, TAIL_LEVEL_LIMIT) for s in p[common:]) or c["description"]
+        lines.append(f"  {i+1}. [{c['code']}] {tail}")
+    return (
+        f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
+        f"СУБПОЗИЦИЯ {code[:4]} {code[4:6]}" + (f": {head}" if head else "") + "\n\n"
+        "КОДЫ СУБПОЗИЦИИ:\n" + "\n".join(lines) + "\n\n"
+        f"{_notes_for_prompt(siblings)}"
+    ).rstrip() + "\n"
+
+
+async def _refine_tail(
+    store: TNVEDStore,
+    description: str,
+    result: dict,
+    candidate_codes: set[str],
+    cfg: LLMConfig,
+) -> None:
+    """Код выбран, а из его подпозиции модель видела не все коды, — уточнить по полному списку.
+
+    Новый код — только из этой подпозиции; прежний становится первой альтернативой. Модель
+    не ответила — остаётся первый выбор и проверка в checks_required; назвала код не из
+    списка — остаётся первый выбор. Что было — в primary["tail"]; in_candidates и уверенность —
+    по первому выбору.
+    """
+    primary = result["primary"]
+    code = primary.get("code") or ""
+    if not code:
+        return
+    found = await asyncio.to_thread(
+        store.search, description, top_k=len(store.meta), group_code=code[:6]
+    )
+    siblings = found[:TAIL_MAX]
+    if code not in {c["code"] for c in siblings}:  # в индексе может не быть кода — строка из базы
+        siblings = siblings[:TAIL_MAX - 1] + [store.code_to_meta.get(code) or store.code_status(code)[1]]
+    codes = {c["code"] for c in siblings}
+    if len(codes) < 2 or codes <= candidate_codes:
+        return
+    siblings.sort(key=lambda c: c["code"])
+
+    try:
+        answer = await llm_json(cfg, TAIL_SYSTEM, _tail_prompt(description, code, siblings))
+    except LLMUnavailable as exc:
+        primary["tail"] = {"from": code, "error": str(exc)}
+        result["checks_required"].append(
+            f"Код внутри субпозиции {code[:4]} {code[4:6]} не уточнён ({exc}) — "
+            "проверить последние знаки по тарифу.")
+        return
+    new = _code_digits(answer.get("code"))
+    why = str(answer.get("reasoning") or "").strip()
+    primary["tail"] = {"from": code, "to": new if new in codes else None,
+                       "codes": sorted(codes), "reasoning": why}
+    if new not in codes or new == code:
+        return
+    primary["code"] = new
+    primary["reasoning"] = f"{primary['reasoning']} Код внутри субпозиции уточнён: {why}".strip()
+    result["alternatives"] = [a for a in result["alternatives"] if a.get("code") != new]
+    result["alternatives"].insert(0, {
+        "code": code,
+        "why_close": "выбран сначала, когда из субпозиции были видны не все коды",
+        "why_rejected": why,
+    })
 
 
 async def classify(
@@ -476,7 +580,9 @@ async def classify(
             result[key] = []
     result["alternatives"] = [a if isinstance(a, dict) else {"code": a} for a in result["alternatives"]]
 
-    _check_codes(store, result, {c["code"] for c in candidates})
+    candidate_codes = {c["code"] for c in candidates}
+    _check_codes(store, result, candidate_codes)
+    await _refine_tail(store, description, result, candidate_codes, cfg)
 
     # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]

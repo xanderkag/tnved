@@ -304,9 +304,11 @@ def _check_codes(store: TNVEDStore, result: dict, candidate_codes: set[str]) -> 
 
 # ─── stage 1 — triage ────────────────────────────────────────────────────────
 
-# Позиции от triage: сколько берём и сколько лучших кодов каждой добавляем к кандидатам.
+# Позиции от triage: сколько берём и сколько кодов каждой добавляем к кандидатам — не меньше
+# HEADING_TOP_K и по коду на каждую подпозицию, но не больше HEADING_MAX.
 MAX_HEADINGS = 3
 HEADING_TOP_K = 8
+HEADING_MAX = 16
 
 
 def _valid_headings(store: TNVEDStore, raw: object) -> list[str]:
@@ -325,6 +327,28 @@ def _valid_headings(store: TNVEDStore, raw: object) -> list[str]:
         if len(digits) >= 4 and digits[:4] in store.current_headings and digits[:4] not in headings:
             headings.append(digits[:4])
     return headings[:MAX_HEADINGS]
+
+
+def _heading_candidates(found: list[dict]) -> list[dict]:
+    """Коды позиции по убыванию близости → лучший код каждой подпозиции (6 знаков), затем
+    ближайшие, пока не наберётся HEADING_TOP_K; всего не больше HEADING_MAX, порядок — поиска.
+
+    Восьми ближайших мало: у вентилятора в 8414 не было ни одного кода 8414 59, у
+    объединительной платы в 8473 — ни одного 8473 30, и модель не могла их выбрать (Д3).
+    """
+    reps: list[str] = []
+    subheadings: set[str] = set()
+    for c in found:
+        if c["code"][:6] not in subheadings:
+            subheadings.add(c["code"][:6])
+            reps.append(c["code"])
+    limit = min(max(HEADING_TOP_K, len(reps)), HEADING_MAX)
+    chosen = set(reps[:limit])
+    for c in found:
+        if len(chosen) >= limit:
+            break
+        chosen.add(c["code"])
+    return [c for c in found if c["code"] in chosen]
 
 
 async def triage(
@@ -405,10 +429,10 @@ async def classify(
     # а нужной подпозиции в нём нет, и модель дописывала хвост кода сама (пилот-10).
     have = {c["code"] for c in candidates}
     for heading in headings or []:
-        found = await asyncio.to_thread(
-            store.search, description, top_k=HEADING_TOP_K, group_code=heading
+        found = await asyncio.to_thread(  # вся позиция по близости: в самой большой 298 кодов
+            store.search, description, top_k=len(store.meta), group_code=heading
         )
-        for c in found[:HEADING_TOP_K]:  # в LITE search отдаёт всю позицию
+        for c in _heading_candidates(found):
             if c["code"] not in have:
                 have.add(c["code"])
                 candidates.append(c)

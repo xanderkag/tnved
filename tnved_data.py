@@ -85,6 +85,12 @@ class TNVEDStore:
             self.index = faiss.read_index(str(FAISS_PATH))
             with open(META_PATH, encoding="utf-8") as f:
                 self.meta = json.load(f)
+            # Путь — из базы: в tnved_meta.json он такой, каким был при сборке индекса,
+            # а parse_tnved.py с тех пор мог его уточнить. Векторы по пути не считаются.
+            with sqlite3.connect(DB_PATH) as conn:
+                paths = dict(conn.execute("SELECT code, full_path FROM codes"))
+            for m in self.meta:
+                m["full_path"] = paths.get(m["code"], m.get("full_path"))
 
             self._check_index_passport(expected_name())
             self.embedder = get_embedder()

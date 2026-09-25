@@ -23,6 +23,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -48,40 +49,113 @@ def code_to_level(code: str) -> int:
     return 4       # подсубпозиция (10 знаков) — листовой узел
 
 
-def parent_code(code: str) -> str | None:
-    """Возвращает код родителя."""
+def parent_code(code: str, known) -> str | None:
+    """Ближайший предок, который есть в справочнике: для 10 знаков — 8, 6, 4, 2.
+
+    Раньше родителем 10-значного всегда считался 6-значный, и путь терял 8-значный
+    уровень: у 7318157008 пропадало «болты с шестигранной головкой из
+    коррозионностойкой стали» — а это и отличает его от соседних кодов.
+    """
     code = code.strip()
-    if len(code) <= 2:
-        return None
-    if len(code) == 4:
-        return code[:2]
-    if len(code) == 6:
-        return code[:4]
-    if len(code) >= 7:
-        return code[:6]
+    for length in (8, 6, 4, 2):
+        if length < len(code) and code[:length] in known:
+            return code[:length]
     return None
 
 
+PATH_SEP = " → "
+# Раздел в начале цепочки тарифа: «Недрагоценные металлы и изделия из них (гр. 72-83)»
+SECTION_RE = re.compile(r"\(гр\. \d")
+
+
+def _norm(text: str | None) -> str:
+    return " ".join((text or "").lower().replace("ё", "е").split()).strip(":").strip()
+
+
+def _same_name(segment: str, tree_desc: str | None) -> bool:
+    """Сегмент цепочки тарифа — это узел дерева? Длинные наименования в дереве обрезаны."""
+    a, b = _norm(segment), _norm(tree_desc)
+    return bool(b) and (a == b or (len(b) > 40 and a.startswith(b)))
+
+
+# Пометки тарифа в конце сегмента: «(с 01.01.2022)» и ссылка на сноску «части 5)».
+# Сноска — только после слова: «(кроме указанных в субпозиции 9603 30)» — это текст.
+NOTE_RE = re.compile(r"\s*\((?:с|по|до)\s\d{2}\.\d{2}\.\d{4}\)$|(?<=[^\d\s])\s+\d{1,2}\)$")
+
+
+def _clean_segment(seg: str) -> str:
+    seg, prev = " ".join(seg.split()), None
+    while seg != prev:
+        prev, seg = seg, NOTE_RE.sub("", seg).rstrip(":").rstrip()
+    return seg
+
+
+def tws_chain(text: str) -> list[str]:
+    """«… 🠺 мебель для сидения вращающаяся …: (с 01.01.2022) 🠺 прочая» → сегменты без пометок и повторов."""
+    out: list[str] = []
+    for seg in text.split("🠺"):
+        seg = _clean_segment(seg)
+        if seg and not (out and _norm(seg) == _norm(out[-1])):
+            out.append(seg)
+    return out
+
+
+def chain_below_heading(chain: list[str], heading: str | None, group: str | None) -> list[str]:
+    """Часть цепочки тарифа ниже товарной позиции (4 знака).
+
+    Цепочка в тарифе начинается с разного уровня: с раздела, группы, позиции, а у 65 %
+    кодов — сразу ниже позиции. Срезаем всё до позиции включительно; если позиции
+    в цепочке нет — только раздел и группу в начале.
+    """
+    hits = [i for i, seg in enumerate(chain) if _same_name(seg, heading)]
+    if hits:
+        return chain[hits[-1] + 1:]
+    start = 0
+    while start < len(chain) - 1 and (SECTION_RE.search(chain[start]) or _same_name(chain[start], group)):
+        start += 1
+    return chain[start:]
+
+
 def build_full_paths(rows: list[dict]) -> dict[str, str]:
-    """Строит словарь code → full_path вида 'Группа 01 > Позиция 0101 > ...'"""
-    by_code = {r["code"]: r["description"] for r in rows}
-    paths: dict[str, str] = {}
+    """code → «группа → позиция → … → код».
 
-    def get_path(code: str) -> str:
-        if code in paths:
-            return paths[code]
-        p = parent_code(code)
-        desc = by_code.get(code, code)
-        if p and p in by_code:
-            paths[code] = get_path(p) + " → " + desc
+    Узлы дерева идут через ближайшего предка, с 8-значным уровнем. У кодов тарифа
+    ниже позиции — цепочка самого тарифа: в ней все уровни с тире, и она в действующей
+    редакции. Наименования 6/8 из дерева 2017 года местами устарели (у 854449
+    «на напряжение не более 80 В» при действующем «не более 1000 В»), их к кодам
+    тарифа не подставляем.
+    """
+    by_code = {r["code"]: r for r in rows}
+    segs: dict[str, list[str]] = {}
+
+    def add(parts: list[str], seg: str) -> None:
+        if seg and not (parts and _norm(seg) == _norm(parts[-1])):
+            parts.append(seg)
+
+    def get_segs(code: str) -> list[str]:
+        if code in segs:
+            return segs[code]
+        row = by_code[code]
+        chain = row.get("tws_chain")
+        if chain:
+            heading, group = code[:4], code[:2]
+            base = heading if heading in by_code else group if group in by_code else None
+            parts = list(get_segs(base)) if base else []
+            below = chain_below_heading(
+                chain,
+                by_code[heading]["description"] if heading in by_code else None,
+                by_code[group]["description"] if group in by_code else None,
+            )
+            for seg in below:
+                add(parts, seg)
         else:
-            paths[code] = desc
-        return paths[code]
+            parent = parent_code(code, by_code)
+            parts = list(get_segs(parent)) if parent else []
+            add(parts, row["description"])
+        segs[code] = parts
+        return parts
 
-    for r in rows:
-        get_path(r["code"])
-
-    return paths
+    return {code: PATH_SEP.join(get_segs(code)) for code in by_code}
 
 
 # ─── parsers ──────────────────────────────────────────────────────────────────
@@ -231,6 +305,7 @@ def parse_tws(path: Path) -> dict[str, dict]:
             "description": leaf_desc or full_path_tws,
             "duty_rate": duty,
             "full_path_tws": full_path_tws,
+            "chain": tws_chain(full_path_tws),
         }
 
     wb.close()
@@ -302,15 +377,18 @@ def merge_sources(hier: list[dict], tws: dict[str, dict]) -> list[dict]:
                 "duty_rate": t["duty_rate"],
                 "data_source": "tws",
             }
+        by_code[code]["tws_chain"] = t.get("chain") or []
     return list(by_code.values())
 
 
 def save_to_db(rows: list[dict]):
+    # Собираем рядом и подменяем в конце: упавшая сборка не оставляет сервис без базы.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if DB_PATH.exists():
-        DB_PATH.unlink()
+    tmp_path = DB_PATH.with_name(DB_PATH.name + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(tmp_path)
     cur = conn.cursor()
 
     cur.execute("""
@@ -329,14 +407,15 @@ def save_to_db(rows: list[dict]):
     cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
 
     print("Строим полные пути ...")
-    paths = build_full_paths([{"code": r["code"], "description": r["description"]} for r in rows])
+    paths = build_full_paths(rows)
+    known = {r["code"] for r in rows}
 
     records = [
         (
             r["code"],
             r["description"],
             code_to_level(r["code"]),
-            parent_code(r["code"]),
+            parent_code(r["code"], known),
             paths.get(r["code"], r["description"]),
             r.get("duty_rate"),
             r.get("data_source", "hierarchy"),
@@ -359,6 +438,7 @@ def save_to_db(rows: list[dict]):
     leaves = cur.execute("SELECT COUNT(*) FROM codes WHERE level=4").fetchone()[0]
     with_rate = cur.execute("SELECT COUNT(*) FROM codes WHERE duty_rate IS NOT NULL").fetchone()[0]
     conn.close()
+    os.replace(tmp_path, DB_PATH)
 
     print(f"Сохранено записей: {total:,}  (листовых: {leaves:,}, со ставкой: {with_rate:,})")
 

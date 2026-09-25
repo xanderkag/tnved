@@ -312,6 +312,24 @@ async def triage(
 
 # ─── stage 2 — final classification ──────────────────────────────────────────
 
+PATH_SEP = " → "
+PROMPT_LEVEL_LIMIT = 150
+
+
+def _path_for_prompt(item: dict, group_code: str) -> str:
+    """Путь кандидата для модели: «позиция → … → с шестигранной головкой → из
+    коррозионностойкой стали → прочие». Различает кандидатов хвост пути, поэтому
+    он идёт целиком; группа уже названа строкой «ОПРЕДЕЛЁННАЯ ГРУППА», а длинные
+    уровни (наименования позиций — до 250 знаков) подрезаем.
+    """
+    segs = [s.strip() for s in (item.get("full_path") or "").split(PATH_SEP) if s.strip()]
+    if len(segs) > 1 and item["code"][:2] == group_code:
+        segs = segs[1:]
+    segs = [s if len(s) <= PROMPT_LEVEL_LIMIT else s[:PROMPT_LEVEL_LIMIT].rsplit(" ", 1)[0] + "…"
+            for s in segs]
+    return PATH_SEP.join(segs) or item["description"]
+
+
 async def classify(
     store: TNVEDStore,
     description: str,
@@ -331,7 +349,7 @@ async def classify(
         candidates = await asyncio.to_thread(store.search, description, top_k=top_k)
 
     candidates_text = "\n".join(
-        f"  {i+1}. [{c['code']}] {c.get('full_path') or c['description']}"
+        f"  {i+1}. [{c['code']}] {_path_for_prompt(c, group_code)}"
         for i, c in enumerate(candidates)
     )
 

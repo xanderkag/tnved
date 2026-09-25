@@ -32,7 +32,7 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:-tnved}-caddy
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-8082}:80"
+      - "${HOST_PORT:-8110}:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -467,34 +468,122 @@ async def chat_get(chat_id: str):
 
 # ─── batch (xlsx in → xlsx out) ───────────────────────────────────────────────
 
-DESC_COL_KEYWORDS = ("описан", "наим", "название", "товар", "descr", "name", "product")
+# Роль колонки — по заголовку: правила по порядку, решает первое совпадение.
+# Поэтому «Страна производства» — страна, «Наименование производителя» —
+# производитель, «Part Number» и «Код товара» — артикул, «Стоимость товара» —
+# прочее, а не описание. Слова ищем с начала слова: «origin» не найдётся
+# в «Original description», «вес» — в «Весы».
+# Колонку с кодом ТН ВЭД, тарифом или пошлиной не читаем: если ответ уже есть
+# в файле, модели его показывать нельзя. «Commodity code» и «код вида товара»
+# из счёта-фактуры — это тоже код ТН ВЭД.
+BATCH_COLUMN_RULES = tuple((role, re.compile(pattern)) for role, pattern in (
+    ("skip", r"\bтн[ -]?вэд|\btn[ -]?ved|\bht?s\b|\bh\.s\.|\bhs-?code|\bcommodity code|\bcustoms code"
+             r"|\bтаможенн|\bкод вида товара|\bтариф|\btariff|\bпошлин|\bdut(?:y|ies)\b"),
+    ("country", r"\bстран|\bcountry|\borigin(?!al)|\bпроисхожд|\bmade in\b|^coo$"),
+    ("manufacturer", r"\bпроизводител|\bизготовител|\bбренд|\bтоварн\w* знак|\bмарка\b|\bbrand|\btrademark"
+                     r"|\bmanufacturer|\bvendor|\bmaker\b|\bproducer|^mf[rg]$"),
+    ("article", r"\bартикул|\bкаталожн|\bномер детали|\bкод (?:товара|изделия)|\bмодель|\bmodel"
+                r"|\bpart ?(?:no\b|num|#)|\bp/n\b|\bsku\b|\barticle|\bitem ?(?:no\b|num|code|#)|\bproduct code"
+                r"|^(?:pn|mpn|арт)$"),
+    # номер по порядку, количество, деньги, вес, стороны сделки — модели не нужны
+    ("other", r"^(?:№|#|no|nr|n|п/п|№ ?п/п|поз|pos|line)$|\bкол-?во\b|\bколич|\bцен[аы]\b|\bстоимост"
+              r"|\bсумм|\bвес\b|\bмасс[аы]\b|\bнетто\b|\bбрутто\b|\bед\.? ?изм|\bединиц|\bвалют|\bитог|\bдата\b"
+              r"|\bприм|\bсерийн|\bпоставщик|\bпродав|\bпокупател|\bзаказчик|\bqty\b|\bquantity|\bprice"
+              r"|\bamount|\btotal|\bweight|\bvalue|\bcurrency|\buom\b|\bunits?\b|\bcosts?\b|\bdate\b|\bnotes?\b"
+              r"|\bremarks?\b|\bcomments?\b|\bserial|\bsupplier|\bseller|\bshipper|\bbuyer|\bconsignee|\bcustomer"),
+    ("description", r"\bописан|\bнаим|\bназван|\bтовар|\bпродукци|\bdescr|\bname|\bproduct|\bgoods|\bitem"
+                    r"|\bcommodity"),
+))
+BATCH_FIELDS = ("description", "article", "manufacturer", "country")
+BATCH_FIELD_LABELS = {"article": "Артикул", "manufacturer": "Производитель", "country": "Страна происхождения"}
+BATCH_HEADER_SCAN_ROWS = 10
+BATCH_HEADER_MAX_LEN = 80  # длиннее — это уже описание товара, а не заголовок
 
 
-def _detect_descriptions(rows: list[tuple]) -> list[str]:
-    """Извлекает описания из xlsx-строк. Если есть строка-заголовок с ключевым словом — берёт ту колонку, иначе — первую непустую."""
-    if not rows:
-        return []
-    header = [str(c).lower().strip() if c is not None else "" for c in rows[0]]
-    col_idx = next(
-        (i for i, h in enumerate(header) if any(k in h for k in DESC_COL_KEYWORDS)),
-        None,
-    )
-    if col_idx is not None:
-        data_rows = rows[1:]
+def _column_role(header: object) -> str | None:
+    h = " ".join(str(header or "").lower().replace("ё", "е").split()).strip(" .:")
+    if not h or len(h) > BATCH_HEADER_MAX_LEN:
+        return None
+    return next((role for role, rx in BATCH_COLUMN_RULES if rx.search(h)), None)
+
+
+def _cell_text(value: object) -> str:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)  # артикул 123456 Excel хранит как 123456.0
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def _read_batch_items(rows: list[tuple]) -> tuple[list[dict], dict]:
+    """Строки xlsx → позиции для классификации и отчёт, какие колонки прочитаны.
+
+    Заголовок — та из первых 10 строк, где узнаётся больше всего колонок, при
+    равенстве — более широкая (строка с названием инвойса над таблицей его не
+    перебьёт). Одна узнанная колонка — заголовок, только если это описание и
+    строка шире всех над ней: иначе это товар, в описании которого попалось
+    «товар», «модель» или «цена». Из одного «прочего» заголовок не собирается:
+    «Валюта: USD | Итого: 5000» над таблицей — не он.
+
+    Заголовка нет — описание из первой колонки, как раньше. Заголовок есть,
+    а колонки описания нет — отказ: по одному артикулу и стране не классифицируем.
+
+    Номер строки — как в Excel, чтобы результат сводился с исходным файлом.
+    Пустые строки пропускаем, строку без описания не выбрасываем, а помечаем.
+    """
+    header_idx, best, widest = None, (0, 0), 0
+    for i, row in enumerate(rows[:BATCH_HEADER_SCAN_ROWS]):
+        filled = [c for c in row or () if _cell_text(c)]
+        roles = [r for r in map(_column_role, filled) if r]
+        if roles == ["description"]:
+            ok = len(filled) > widest
+        else:
+            ok = len(roles) >= 2 and any(r != "other" for r in roles)
+        if ok and (len(roles), len(filled)) > best:
+            best, header_idx = (len(roles), len(filled)), i
+        widest = max(widest, len(filled))
+
+    columns: dict = {"header_row": None, "unused": [], **{f: [] for f in BATCH_FIELDS}}
+    if header_idx is None:
+        cols = {0: "description"}
+        data_start = 0
     else:
-        col_idx = 0
-        data_rows = rows
-    out = []
-    for row in data_rows:
-        if not row or len(row) <= col_idx:
+        header = rows[header_idx]
+        cols = {}
+        for i, cell in enumerate(header):
+            name, role = _cell_text(cell), _column_role(cell)
+            if role in BATCH_FIELDS:
+                cols[i] = role
+                columns[role].append(name)
+            elif name:
+                columns["unused"].append(name)
+        columns["header_row"] = header_idx + 1
+        if not columns["description"]:
+            raise ValueError(
+                f"В строке {header_idx + 1} заголовок ({', '.join(filter(None, map(_cell_text, header)))}), "
+                f"но нет колонки с описанием товара — назовите её «Описание», «Наименование» или «Description»"
+            )
+        data_start = header_idx + 1
+
+    items = []
+    for n, row in enumerate(rows[data_start:], start=data_start + 1):
+        row = row or ()
+        if not any(_cell_text(c) for c in row):
             continue
-        val = row[col_idx]
-        if val is None:
-            continue
-        s = str(val).strip()
-        if s:
-            out.append(s)
-    return out
+        item: dict = {"row": n, **{f: [] for f in BATCH_FIELDS}}
+        for i, role in cols.items():
+            value = _cell_text(row[i]) if i < len(row) else ""
+            if value and value not in item[role]:
+                item[role].append(value)
+        item.update({f: "; ".join(item[f]) for f in BATCH_FIELDS})
+        item["text"] = "\n".join(
+            [item["description"]]
+            + [f"{label}: {item[f]}" for f, label in BATCH_FIELD_LABELS.items() if item[f]]
+        )
+        if not item["description"]:
+            item["error"] = "нет описания товара"
+        elif len(item["text"]) > MAX_DESCRIPTION_LEN:
+            item["error"] = f"описание длиннее {MAX_DESCRIPTION_LEN} символов"
+        items.append(item)
+    return items, columns
 
 
 async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
@@ -511,24 +600,27 @@ async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
     }
 
 
-async def _run_batch(job_id: str, descriptions: list[str], cfg: LLMConfig) -> None:
+async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
     job = state.batch_jobs[job_id]
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
-    async def worker(idx: int, desc: str) -> None:
+    async def worker(idx: int, item: dict) -> None:
+        if item.get("error"):  # строка без описания или слишком длинная — к модели не идёт
+            job["results"][idx] = {"error": item["error"]}
+            job["errors"].append({"row": item["row"], "error": item["error"]})
+            job["processed"] += 1
+            return
         async with sem:
             try:
-                row = await _classify_one_for_batch(desc, cfg)
-                row["description"] = desc
-                job["results"][idx] = row
+                job["results"][idx] = await _classify_one_for_batch(item["text"], cfg)
             except Exception as e:
-                job["results"][idx] = {"description": desc, "error": str(e)}
-                job["errors"].append({"row": idx + 1, "error": str(e)})
+                job["results"][idx] = {"error": str(e)}
+                job["errors"].append({"row": item["row"], "error": str(e)})
             finally:
                 job["processed"] += 1
 
     try:
-        await asyncio.gather(*(worker(i, d) for i, d in enumerate(descriptions)))
+        await asyncio.gather(*(worker(i, item) for i, item in enumerate(items)))
         job["status"] = "done"
     except Exception as e:
         job["status"] = "failed"
@@ -552,33 +644,39 @@ async def classify_batch_start(
     try:
         wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
         ws = wb.active
+        ws.reset_dimensions()  # размер листа в файле бывает записан неверно — тогда читались бы не все колонки
         rows = list(ws.iter_rows(values_only=True))
     except Exception as e:
         raise HTTPException(400, f"Не смог прочитать xlsx: {e}")
 
-    descriptions = _detect_descriptions(rows)
-    if not descriptions:
+    try:
+        items, columns = _read_batch_items(rows)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not any("error" not in item for item in items):
         raise HTTPException(400, "В xlsx не нашёл строк с описаниями товаров")
-    if len(descriptions) > BATCH_MAX_ROWS:
-        raise HTTPException(400, f"Слишком много строк: {len(descriptions)} > лимит {BATCH_MAX_ROWS}")
+    if len(items) > BATCH_MAX_ROWS:
+        raise HTTPException(400, f"Слишком много строк: {len(items)} > лимит {BATCH_MAX_ROWS}")
 
     job_id = uuid.uuid4().hex[:12]
     state.batch_jobs[job_id] = {
         "id": job_id,
         "filename": file.filename,
-        "total": len(descriptions),
+        "total": len(items),
         "processed": 0,
         "status": "running",
         "started_at": datetime.utcnow().isoformat(),
         "finished_at": None,
         "llm_model": cfg.model,
-        "results": [None] * len(descriptions),
+        "columns": columns,
+        "items": items,
+        "results": [None] * len(items),
         "errors": [],
     }
 
-    asyncio.create_task(_run_batch(job_id, descriptions, cfg))
+    asyncio.create_task(_run_batch(job_id, items, cfg))
 
-    return {"job_id": job_id, "total": len(descriptions), "status": "running"}
+    return {"job_id": job_id, "total": len(items), "status": "running", "columns": columns}
 
 
 @app.get("/api/classify/batch/{job_id}")
@@ -610,23 +708,24 @@ async def classify_batch_download(job_id: str):
     ws = wb.active
     ws.title = "Результат"
     ws.append([
-        "№", "Описание", "Код ТН ВЭД", "Наименование", "Пошлина", "Уверенность",
+        "Строка файла", "Описание", "Артикул", "Производитель", "Страна",
+        "Код ТН ВЭД", "Наименование", "Пошлина", "Уверенность",
         "Группа", "Альт. 1", "Альт. 1 пошлина", "Альт. 2", "Альт. 2 пошлина", "Ошибка",
     ])
-    for i, r in enumerate(job["results"], start=1):
+    for item, r in zip(job["items"], job["results"]):
+        source = [item["row"], item["description"], item["article"], item["manufacturer"], item["country"]]
         if r is None:
-            ws.append([i, "", "", "", "", "", "", "", "", "", "", "обработка прервана"])
+            ws.append(source + [""] * 9 + ["обработка прервана"])
             continue
         if "error" in r:
-            ws.append([i, r["description"], "", "", "", "", "", "", "", "", "", r["error"]])
+            ws.append(source + [""] * 9 + [r["error"]])
             continue
         primary = r.get("primary") or {}
         alts = r.get("alternatives") or []
         a1 = alts[0] if len(alts) > 0 else {}
         a2 = alts[1] if len(alts) > 1 else {}
         ws.append([
-            i,
-            r["description"],
+            *source,
             primary.get("code", ""),
             primary.get("full_path") or "",
             primary.get("duty_rate") or "",

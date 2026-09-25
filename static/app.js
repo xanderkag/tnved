@@ -582,6 +582,7 @@ async function onBatchStart() {
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
         const data = await r.json();
         batchState.jobId = data.job_id;
+        $("batch-columns").textContent = batchColumnsText(data.columns);
         $("batch-progress").hidden = false;
         $("batch-progress-label").textContent = `Обработано: 0 / ${data.total}`;
         $("batch-progress-status").textContent = "running";
@@ -595,6 +596,22 @@ async function onBatchStart() {
         setBusy(false);
         setStatus("");
     }
+}
+
+// Какие колонки сервер прочитал — чтобы было видно, что артикул и страна не потерялись.
+function batchColumnsText(c) {
+    if (!c) return "";
+    if (!c.header_row) return "Заголовка нет — описание взято из первой колонки.";
+    const names = (list) => list.map((n) => `«${n}»`).join(", ");
+    const used = [
+        ["описание", c.description], ["артикул", c.article],
+        ["производитель", c.manufacturer], ["страна", c.country],
+    ].filter(([, list]) => list && list.length).map(([label, list]) => `${label} — ${names(list)}`);
+    let text = `Колонки (заголовок в строке ${c.header_row}): ${used.join("; ")}.`;
+    if (c.unused && c.unused.length) text += ` Не используются: ${names(c.unused)}.`;
+    if (c.header_row === 2) text += " Строка 1 над заголовком не читается.";
+    if (c.header_row > 2) text += ` Строки 1–${c.header_row - 1} над заголовком не читаются.`;
+    return text;
 }
 
 function startBatchPolling() {
@@ -646,6 +663,7 @@ function onBatchReset(opts = {}) {
     $("batch-progress").hidden = true;
     $("batch-done").hidden = true;
     $("batch-progress-errors").textContent = "";
+    $("batch-columns").textContent = "";
 }
 
 

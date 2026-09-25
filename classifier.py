@@ -424,25 +424,39 @@ def _path_for_prompt(item: dict, group_code: str) -> str:
 # только 8473302008 (электронные модули), а 8473308000 (прочие части) — нет, у вентилятора из
 # 8414 59 — только центробежные, у блока питания из 8504 40 — только инверторы (пилот-10, Д4).
 # Тогда код уточняется вторым вызовом по всем кодам подпозиции: в 99 % подпозиций их до 18,
-# в самой большой — 72, берём ближайшие TAIL_MAX. Тексты кодов здесь почти не режем: у
-# 8473302002 ключ «звуковая карта» — в конце текста из 371 знака.
+# в самой большой — 72, берём ближайшие TAIL_MAX. Коды показываем деревом, как в тарифе:
+# «прочие» значат «кроме соседей своего уровня», а в плоском списке уровень не виден. Тексты
+# почти не режем: у 8473302002 ключ «звуковая карта» — в конце текста из 371 знака.
 TAIL_MAX = 30
 TAIL_LEVEL_LIMIT = 400
 
 TAIL_SYSTEM = """Ты эксперт-классификатор ТН ВЭД ЕАЭС.
 
 Товар уже отнесён к субпозиции (первые 6 знаков кода). Выбери в ней ОДИН 10-значный код.
-Сравни описание товара с текстом каждого кода субпозиции и возьми тот, под который товар подходит;
-«прочие» — только если товар не подходит ни под один более конкретный код. Примечания, если даны, применяй.
-Код бери только из списка.
+Коды даны деревом, как в тарифе: строка с двоеточием — уровень, строки под ней с отступом входят в него.
+Товар должен подходить под каждый уровень над выбранным кодом. «Прочие» — всё, что не вошло в соседние
+строки того же уровня: выбирай «прочие», только если товар не подходит ни под одного соседа.
+Примечания, если даны, применяй. Код бери только из списка.
 
 Отвечай СТРОГО в формате JSON:
 {"code": "XXXXXXXXXX", "reasoning": "1–2 предложения: почему этот код, а не соседние"}"""
 
 
-def _tail_prompt(description: str, code: str, siblings: list[dict]) -> str:
-    """Общая часть пути — строкой субпозиции (без группы), у кодов — только то, чем они различаются."""
+def _tail_paths(siblings: list[dict]) -> list[list[str]]:
+    """Пути кодов подпозиции. При сборке базы подряд идущие одинаковые уровни склеены, и у
+    8544429009 «прочие → прочие» стало одним «прочие» — лист совпал с узлом, под которым лежат
+    соседи («прочие → на напряжение не более 80 В → прочие»), и выглядел самым общим кодом.
+    Такой лист возвращаем на уровень ниже; склеено в 40 % подпозиций, где больше одного кода.
+    """
     paths = [_path_levels(c) for c in siblings]
+    return [p + p[-1:] if any(len(q) > len(p) and q[:len(p)] == p for q in paths) else p
+            for p in paths]
+
+
+def _tail_prompt(description: str, code: str, siblings: list[dict]) -> str:
+    """Общая часть пути — строкой субпозиции (без группы), ниже — дерево кодов с отступами.
+    siblings — по порядку кода: так идут коды в тарифе, и уровни не разрываются."""
+    paths = _tail_paths(siblings)
     common = 0
     for level in zip(*paths):
         if any(s != level[0] for s in level):
@@ -450,10 +464,17 @@ def _tail_prompt(description: str, code: str, siblings: list[dict]) -> str:
         common += 1
     common = max(0, min(common, min(len(p) for p in paths) - 1))  # у каждого кода остаётся хоть уровень
     head = PATH_SEP.join(_cut_level(s, PROMPT_LEVEL_LIMIT) for s in paths[0][1:common])
-    lines = []
-    for i, (c, p) in enumerate(zip(siblings, paths)):
-        tail = PATH_SEP.join(_cut_level(s, TAIL_LEVEL_LIMIT) for s in p[common:]) or c["description"]
-        lines.append(f"  {i+1}. [{c['code']}] {tail}")
+    lines: list[str] = []
+    above: list[str] = []  # уровни над предыдущим кодом
+    for c, p in zip(siblings, paths):
+        rest = p[common:] or [c["description"]]
+        same = 0
+        while same < min(len(above), len(rest) - 1) and above[same] == rest[same]:
+            same += 1
+        for depth in range(same, len(rest) - 1):
+            lines.append(f"{'  ' * depth}- {_cut_level(rest[depth], TAIL_LEVEL_LIMIT)}:")
+        lines.append(f"{'  ' * (len(rest) - 1)}- [{c['code']}] {_cut_level(rest[-1], TAIL_LEVEL_LIMIT)}")
+        above = rest[:-1]
     return (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"СУБПОЗИЦИЯ {code[:4]} {code[4:6]}" + (f": {head}" if head else "") + "\n\n"

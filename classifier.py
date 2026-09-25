@@ -294,6 +294,21 @@ def normalize_input(simple_text: str | None, fields: dict | None) -> str:
     return "\n".join(parts)
 
 
+# Описание — только обозначение («РС 50-36-С», «Т3-150-Ф1Е»): ни одного слова, по которому видно,
+# что это за товар. На холдинге таких 1 737 строк из 5 438, с кодом — 207, все 9026102100; модель
+# угадывала и попадала 0 из 30 даже в 4 знаках. Словом считаем 4+ буквы (любой регистр: бывают
+# описания прописными) или 3 буквы со строчной («лак», «бак»); «РС», «IP68», «Ф1Е» — не слова.
+DESIGNATION_ONLY = ("описание — только обозначение, без названия товара: по нему код не определить; "
+                    "нужно наименование (что это за товар) или код по истории «артикул → код»")
+
+
+def designation_only(text: str) -> bool:
+    if not (text or "").strip():
+        return False
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
+    return not any(len(w) >= 4 or (len(w) == 3 and re.search(r"[a-zа-яё]", w)) for w in words)
+
+
 def merge_qa(description: str, answers: list[dict]) -> str:
     """Добавляет к описанию ответы на уточняющие вопросы."""
     if not answers:
@@ -722,6 +737,10 @@ async def classify(
     await _refine_tail(store, description, result, candidate_codes, cfg)
     _calibrate_confidence(result)
     _subheading_rivals(store, result)
+    if designation_only(description) and primary["code"]:
+        # в пакет такие строки не доходят (отказ до модели); здесь — «один товар» и чат без ответов
+        primary["confidence"] = "low"
+        result["checks_required"].insert(0, f"Код — догадка: {DESIGNATION_ONLY}.")
 
     # Обогащаем коды иерархией, текстами ОПИ и ставкой пошлины
     code = primary["code"]

@@ -27,8 +27,10 @@ from pydantic import BaseModel, Field
 
 from classifier import (
     LLMConfig,
+    DESIGNATION_ONLY,
     LLMUnavailable,
     classify,
+    designation_only,
     llm_config_from_env,
     merge_qa,
     normalize_input,
@@ -686,6 +688,9 @@ def _read_batch_items(rows: list[tuple]) -> tuple[list[dict], dict]:
             item["error"] = "нет описания товара"
         elif len(item["text"]) > MAX_DESCRIPTION_LEN:
             item["error"] = f"описание длиннее {MAX_DESCRIPTION_LEN} символов"
+        elif designation_only(item["description"]):
+            # модель на таких угадывает (0 из 30 на холдинге) — не тратим вызов, говорим почему
+            item["error"] = f"код не выдан: {DESIGNATION_ONLY}"
         items.append(item)
     return items, columns
 

@@ -43,7 +43,7 @@ from pathlib import Path
 import httpx
 from openpyxl import Workbook, load_workbook
 
-from classifier import _CODE_PROBLEM
+from classifier import _CODE_PROBLEM, DESIGNATION_ONLY
 from netcheck import require_internal_url
 
 LEVELS = (2, 4, 6, 10)
@@ -60,6 +60,7 @@ DESC_HEADER = re.compile(r"описан|наимен|товар|descr|\bname\b|g
 NO_CODE_REASONS = {
     "несуществующий код": _CODE_PROBLEM["unknown"],
     "снятый код": _CODE_PROBLEM["retired"],
+    "только обозначение": DESIGNATION_ONLY,
     "неполный код": _CODE_PROBLEM["not_leaf"],
     "модель не назвала код": "модель не назвала код",
 }

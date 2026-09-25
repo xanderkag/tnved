@@ -2,11 +2,13 @@
 Загрузка ресурсов ТН ВЭД: SQLite (всегда) + опционально FAISS + embedding-модель.
 
 LITE_MODE=1 → пропускаем FAISS/embedder. search() в этом режиме отдаёт
-все 10-значные листья из выбранной группы напрямую из SQLite.
-Это приемлемо для пилота / слабого сервера, где собрать FAISS-индекс
-или прогрузить sentence-transformers нет возможности.
+первые LITE_TOP_K действующих 10-значных листьев группы по порядку кода,
+напрямую из SQLite. Только проверить, что стек поднимается: для прогонов
+и пилота не годится — в большой группе нужный код в эти 120 не попадает.
 
 LITE_MODE=0 (или не задан) → нормальный режим с векторным поиском.
+
+В обоих режимах кандидаты — только действующие 10-значные коды (is_current_leaf).
 """
 
 from __future__ import annotations
@@ -25,6 +27,16 @@ INFO_PATH = BASE / "data" / "tnved_index_info.json"
 
 LITE_MODE = os.environ.get("LITE_MODE", "0") == "1"
 LITE_TOP_K = int(os.environ.get("LITE_TOP_K", "120"))
+
+# Ответом может быть только действующий 10-значный код — тот, что есть в тарифе TWS.
+# 6- и 8-значные в индексе остаются, но это путь, а не ответ. Коды только из дерева
+# 2017 (data_source='hierarchy') сняты: модель уверенно выбирала 9401300001 вместо
+# действующих 9401310000/9401390000 — с таким кодом декларацию не примут.
+CURRENT_SOURCES = ("hierarchy+tws", "tws")
+
+
+def is_current_leaf(item: dict) -> bool:
+    return len(item["code"]) == 10 and item.get("data_source") in CURRENT_SOURCES
 
 
 class TNVEDStore:
@@ -132,19 +144,26 @@ class TNVEDStore:
     # ─── поиск ────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 12, group_code: str | None = None) -> list[dict]:
-        """В нормальном режиме — векторный поиск; в LITE — sql-фильтр по группе."""
+        """Кандидаты — только действующие 10-значные коды (is_current_leaf).
+
+        В нормальном режиме — векторный поиск; в LITE — sql-фильтр по группе.
+        """
         if self.lite:
             return self._search_lite(group_code)
 
         # Vector path (full mode). Префикс запроса, если нужен, добавит бэкенд.
-        oversample = top_k * 8 if group_code else top_k
+        # Кандидатов в индексе меньше половины (остальное — 6/8-значные и снятые),
+        # и их длинные тексты вытесняют листья из верха выдачи. Индекс точный
+        # (IndexFlatIP), поэтому берём выдачу целиком: 30 тыс. оценок — миллисекунды.
         vec = self.embedder.encode([query], is_query=True)
-        scores, ids = self.index.search(vec, oversample)
+        scores, ids = self.index.search(vec, int(self.index.ntotal))
         results: list[dict] = []
         for score, idx in zip(scores[0], ids[0]):
             if idx < 0:
                 continue
             item = self.meta[idx]
+            if not is_current_leaf(item):
+                continue
             if group_code and not item["code"].startswith(group_code):
                 continue
             results.append({**item, "score": float(score)})
@@ -167,31 +186,32 @@ class TNVEDStore:
         return results
 
     def _search_lite(self, group_code: str | None) -> list[dict]:
-        """SQLite-only fallback. Все листы группы (≤ LITE_TOP_K), без векторного скоринга."""
-        sql_args: tuple
+        """SQLite-only fallback. Действующие листы группы (≤ LITE_TOP_K), без векторного скоринга."""
+        current = ", ".join("?" * len(CURRENT_SOURCES))
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             if group_code:
                 rows = conn.execute(
-                    """
-                    SELECT code, description, full_path, duty_rate
+                    f"""
+                    SELECT code, description, full_path, duty_rate, data_source
                     FROM codes
-                    WHERE level = 4 AND code LIKE ?
+                    WHERE level = 4 AND length(code) = 10 AND data_source IN ({current})
+                      AND code LIKE ?
                     ORDER BY code
                     LIMIT ?
                     """,
-                    (f"{group_code}%", LITE_TOP_K),
+                    (*CURRENT_SOURCES, f"{group_code}%", LITE_TOP_K),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    SELECT code, description, full_path, duty_rate
+                    f"""
+                    SELECT code, description, full_path, duty_rate, data_source
                     FROM codes
-                    WHERE level = 4
+                    WHERE level = 4 AND length(code) = 10 AND data_source IN ({current})
                     ORDER BY code
                     LIMIT ?
                     """,
-                    (LITE_TOP_K,),
+                    (*CURRENT_SOURCES, LITE_TOP_K),
                 ).fetchall()
         return [
             {
@@ -199,6 +219,7 @@ class TNVEDStore:
                 "description": r["description"],
                 "full_path": r["full_path"],
                 "duty_rate": r["duty_rate"],
+                "data_source": r["data_source"],
                 "score": 1.0,
             }
             for r in rows

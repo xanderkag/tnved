@@ -48,3 +48,6 @@ demo_input.xlsx
 static/demo_input.xlsx
 .claude/
 build_log.txt
+
+# Выгрузки справочника (export_codes.py) — производное от data/, в git не кладём
+exports/

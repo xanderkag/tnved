@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel
@@ -67,6 +68,9 @@ class LLMUnavailable(RuntimeError):
 # ─── вызов модели ─────────────────────────────────────────────────────────────
 
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
+# Потолок ответа. Без него зациклившаяся модель пишет до конца контекста (32k токенов) —
+# минуты вместо секунд. Обрезанный ответ — отказ, а не «что успело».
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
 
 
 def _parse_json_loose(raw: str) -> dict:
@@ -82,12 +86,20 @@ def _parse_json_loose(raw: str) -> dict:
 
 
 async def llm_json(cfg: LLMConfig, system: str, user: str) -> dict:
-    """Запрос к нашей модели с response_format=json_object."""
+    """Запрос к нашей модели с response_format=json_object.
+
+    Любой непригодный ответ — отказ (LLMUnavailable → 503), а не пустой результат:
+    таймаут, ошибка сервера, ответ обрезан по LLM_MAX_TOKENS, не JSON-объект.
+    """
     client = AsyncOpenAI(
         api_key=cfg.api_key or "EMPTY",
         base_url=cfg.base_url,
         timeout=LLM_TIMEOUT,
+        # Без скрытых повторов: они втрое растягивают таймаут и добавляют нагрузку
+        # на и без того занятую модель. Отказ виден сразу.
+        max_retries=0,
     )
+    t0 = time.perf_counter()
     try:
         resp = await client.chat.completions.create(
             model=cfg.model,
@@ -97,11 +109,29 @@ async def llm_json(cfg: LLMConfig, system: str, user: str) -> dict:
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
+            max_tokens=LLM_MAX_TOKENS,
+            # Qwen3.x — без «размышлений», ответ сразу JSON. Иначе при reasoning-парсере
+            # на сервере модель думает до JSON тысячи токенов и не укладывается в таймаут.
+            # Шаблоны других моделей лишний ключ игнорируют.
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
     except APIError as exc:
         raise LLMUnavailable(f"Модель {cfg.model} не ответила: {exc}") from exc
-    raw = resp.choices[0].message.content or "{}"
-    return _parse_json_loose(raw)
+
+    choice = resp.choices[0]
+    usage = resp.usage
+    print(f"[llm] {cfg.model}: {time.perf_counter() - t0:.1f}s, "
+          f"prompt={usage.prompt_tokens if usage else '?'} "
+          f"compl={usage.completion_tokens if usage else '?'}, finish={choice.finish_reason}")
+    if choice.finish_reason == "length":
+        raise LLMUnavailable(f"Модель {cfg.model}: ответ обрезан на {LLM_MAX_TOKENS} токенах (LLM_MAX_TOKENS)")
+    try:
+        result = _parse_json_loose(choice.message.content or "")
+    except json.JSONDecodeError as exc:
+        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise LLMUnavailable(f"Модель {cfg.model} вернула не JSON-объект, а {type(result).__name__}")
+    return result
 
 # ─── промпты ──────────────────────────────────────────────────────────────────
 

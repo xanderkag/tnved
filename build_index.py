@@ -8,6 +8,9 @@
   data/tnved_meta.json       — список {code, description, full_path, ...}
   data/tnved_index_info.json — каким бэкендом и в какой размерности собран
 
+Текст вектора — путь кода из базы с названиями позиций у ссылок номером
+(build_index_texts); тот же текст пишется в tnved_meta.json как index_text.
+
 Векторизацией занимается embedder.py — bge-m3 на GPU-сервере через
 `/v1/embeddings` (EMBEDDINGS_BASE_URL; быстро, ничего локально не нужно), либо,
 только явно, локальная e5 на CPU (EMBEDDER_BACKEND=local, requirements-e5.txt).
@@ -26,6 +29,7 @@ Docker-образа он не строится, образ берёт готов
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -40,131 +44,151 @@ FAISS_PATH = BASE / "data" / "tnved.faiss"
 META_PATH = BASE / "data" / "tnved_meta.json"
 INFO_PATH = BASE / "data" / "tnved_index_info.json"
 VECS_INFO_PATH = BASE / "data" / "tnved_vecs_info.json"
-TWS_PATH = BASE / "data" / "raw" / "tws_tnved.xlsx"
-
-# Насколько подрезать описание каждого уровня иерархии при склейке текста.
-LEVEL_TEXT_LIMIT = int(os.environ.get("EMBED_LEVEL_LIMIT", "140"))
 CHUNK_SIZE = int(os.environ.get("EMBED_CHUNK", "1024"))
 # Актуально только для локального бэкенда: на слабом CPU многопоточность
 # torch плюс нехватка памяти давали access violation.
 EMBED_THREADS = int(os.environ.get("EMBED_THREADS", "8"))
+
+PATH_SEP = " → "
+# Группа одна на все свои коды: внутри группы она не различает, а длинная только
+# размывает вектор. Берём её до первой «;» и не длиннее этого.
+GROUP_TEXT_LIMIT = 140
+# Ссылка на позицию номером: «машин товарной позиции 8471», «товарных позиций
+# 8470 - 8472», «товарной позиции 5903, 5906 или 5907», «подсубпозиции 8472 90 300 0».
+_CODE = r"\d{4}(?:\s?\d{2}(?:\s?\d{2,3}(?:\s?\d)?)?)?"
+REF_RE = re.compile(rf"позици[а-яё]*\s*({_CODE}(?:\s*(?:[-–—]|,|или|и)\s*{_CODE})*)", re.I)
+# Ссылка в исключении — «жир …, кроме жира товарной позиции 1503»: туда название
+# не ставим, иначе запрос про жир 1503 притянет код, который его как раз исключает.
+NEG_RE = re.compile(r"кроме|исключени|исключая|не включ|отличн", re.I)
+GENERIC = {"прочие", "прочая", "прочий", "прочее", "другие"}
+REF_RANGE_MAX = 3  # «8470 - 8472» раскрываем, «3901 - 3914» — нет: 14 названий не помогут
+REF_NAMES_MAX = 3
 
 
 def _part_path(offset: int, count: int) -> Path:
     return PARTS_DIR / f"part_{offset:06d}_{count}.npy"
 
 
-def _load_tws_chains() -> dict[str, str]:
-    """Полные цепочки наименований из выгрузки TWS.BY.
+def _norm(text: str) -> str:
+    return " ".join(text.lower().replace("ё", "е").split())
 
-    В файле колонка «Наименование» содержит всю цепочку через символ 🠺:
-    «… 🠺 мебель для сидения вращающаяся с регулирующими высоту
-    приспособлениями: (с 01.01.2022) 🠺 прочая».
 
-    Загрузчик `parse_tnved.py` брал из неё только последний сегмент, поэтому
-    в базе у 9401390000 осталось одно слово «прочая», а различающая
-    формулировка (по сути «офисное кресло») терялась. Здесь берём цепочку
-    целиком — она и есть тот текст, по которому вообще можно искать.
-    """
-    if not TWS_PATH.exists():
-        print(f"Выгрузки TWS не нашёл ({TWS_PATH.name}) — беру описания только из базы.")
-        return {}
+def _case(seg: str) -> str:
+    """Уровни дерева 2017 года записаны заглавными — к виду тарифа: «Вычислительные машины…»."""
+    return seg[:1] + seg[1:].lower() if seg.isupper() else seg
 
-    try:
-        import openpyxl
-    except ImportError:
-        print("openpyxl не установлен — цепочки TWS не подхватываю.")
-        return {}
 
-    import re
+def _short_name(desc: str) -> str:
+    """«ВЫЧИСЛИТЕЛЬНЫЕ МАШИНЫ И ИХ БЛОКИ; МАГНИТНЫЕ …» → «вычислительные машины и их блоки»."""
+    text, prev = " ".join(desc.split()), None
+    while text != prev:  # «(например, …)», «(кроме …)» — изнутри наружу
+        prev, text = text, re.sub(r"\s*\([^()]*\)", "", text)
+    # незакрытая скобка — наименование обрезано в дереве посреди «(например, …»
+    text = re.split(r"[;(]", text)[0].strip(" ,.:")
+    if len(text) > 120:
+        cut = text[:120]
+        text = cut.rsplit(",", 1)[0] if "," in cut[40:] else cut.rsplit(" ", 1)[0]
+    return text.lower()
 
-    wb = openpyxl.load_workbook(TWS_PATH, read_only=True, data_only=True)
-    sheet = "ТНВЭД" if "ТНВЭД" in wb.sheetnames else wb.sheetnames[-1]
-    chains: dict[str, str] = {}
-    for row in wb[sheet].iter_rows(min_row=2, values_only=True):
-        if not row or not row[0]:
+
+def _near_dup(a: str, b: str) -> bool:
+    """Один уровень дважды подряд: позиция из дерева 2017 и она же из цепочки тарифа
+    («…для машин товарных позиций 8469 - 8472» и «…8470 - 8472») или та же строка,
+    обрезанная в дереве."""
+    na, nb = _norm(a), _norm(b)
+    k = 0
+    while k < min(len(na), len(nb)) and na[k] == nb[k]:
+        k += 1
+    return na == nb or k >= 40
+
+
+def _ref_codes(nums: str) -> list[str] | None:
+    """«8470 - 8472» → 8470, 8471, 8472; «5903, 5906 или 5907» → три кода.
+
+    None — ссылка слишком широкая, чтобы её называть: диапазон больше REF_RANGE_MAX
+    («3901 - 3914») или больше REF_NAMES_MAX позиций («8601 - 8606, 8701 - 8705, …, 8806»).
+    Три случайных названия из такого списка не поясняют, а сбивают."""
+    tokens = re.findall(rf"{_CODE}|[-–—]", nums)
+    codes: list[str] = []
+    i = 0
+    while i < len(tokens):
+        start = re.sub(r"\D", "", tokens[i])
+        if i + 2 < len(tokens) and tokens[i + 1] in ("-", "–", "—"):
+            end = re.sub(r"\D", "", tokens[i + 2])
+            if not (len(start) == len(end) == 4 and 0 < int(end) - int(start) <= REF_RANGE_MAX):
+                return None
+            codes += [str(n).zfill(4) for n in range(int(start), int(end) + 1)]
+            i += 3
             continue
-        code = re.sub(r"\D", "", str(row[0]))
-        name = str(row[1] or "").strip()
-        if len(code) != 10 or not name:
+        codes.append(start)
+        i += 1
+    return codes if len({c[:4] for c in codes}) <= REF_NAMES_MAX else None
+
+
+def _with_ref_names(seg: str, headings: dict[str, str], desc: dict[str, str]) -> str:
+    """«части и принадлежности машин товарной позиции 8471» →
+    «… 8471 (вычислительные машины и их блоки)». Без названия в тексте 8473 30 нет
+    ни «вычислительных машин», ни «сервера», и деталь сервера его не находит."""
+    out: list[str] = []
+    pos = 0
+    for m in REF_RE.finditer(seg):
+        clause, prev = seg[:m.start()].rsplit(";", 1)[-1], None
+        while clause != prev:  # «(кроме футляров, чехлов …), предназначенные для» — не исключение
+            prev, clause = clause, re.sub(r"\([^()]*\)", "", clause)
+        if NEG_RE.search(clause):
             continue
-        segments: list[str] = []
-        for seg in re.split(r"🠺", name):
-            seg = seg.strip().strip(":").strip()
-            if not seg:
+        names: list[str] = []
+        for code in _ref_codes(m.group(1)) or []:
+            name = headings.get(code[:4])
+            if not name:
                 continue
-            if len(seg) > LEVEL_TEXT_LIMIT:
-                seg = seg[:LEVEL_TEXT_LIMIT].rsplit(" ", 1)[0] + "…"
-            if segments and seg.lower() == segments[-1].lower():
-                continue
-            segments.append(seg)
-        if segments:
-            chains[code] = " → ".join(segments)
-    wb.close()
-    print(f"Цепочек наименований из TWS: {len(chains):,}")
-    return chains
+            own = _short_name(desc.get(code) or "") if len(code) > 4 else ""
+            if own and own not in GENERIC and not re.search(r"\d{4}", own):
+                name = f"{name}: {own}"
+            if name not in names:
+                names.append(name)
+        if names:
+            out.append(seg[pos:m.end()] + " (" + "; ".join(names[:REF_NAMES_MAX]) + ")")
+            pos = m.end()
+    out.append(seg[pos:])
+    return "".join(out)
 
 
 def build_index_texts(rows: list[dict]) -> list[str]:
-    """Собирает текст для векторизации как цепочку от группы до самого кода.
+    """Текст для вектора — путь кода из базы (parse_tnved.py): группа → позиция → … → код.
 
-    Зачем не брать full_path как есть: он заполнен у всех записей, но у части
-    кодов (пришедших без иерархии) содержит только собственное название листа.
-    В итоге 659 разных кодов индексировались одним словом «прочие», а всего
-    неуникальный текст был у 22,8 % записей — такие коды векторный поиск
-    различить не может в принципе.
+    В пути у кодов тарифа ниже позиции — цепочка самого тарифа в действующей редакции,
+    без пометок «(с 01.01.2022)» и сносок; выше — узлы дерева. Поверх пути:
+      - ссылка на позицию номером получает название позиции (кроме ссылок в исключениях);
+      - уровни дерева 2017 года — строчными, как в тарифе;
+      - позиция, записанная дважды (в дереве и в тарифе), остаётся одна — вторая;
+      - группа — до первой «;». Остальные уровни не режем: позиция 8473 обрезалась
+        на «…предназначенные исключительно или в основном для…», и терялось, для чего.
 
-    Поэтому текст склеиваем из описаний всех предков по префиксам кода
-    (2/4/6/8/10 знаков): «МЕБЕЛЬ ДЛЯ СИДЕНИЯ … → мебель обитая → прочая».
+    Замер 25.09.2026 против текстов 30.07 (bge-m3, место ожидаемого кода среди
+    действующих кодов группы): 30 синтетических описаний — в первых 12 было 24, стало 28,
+    MRR 0,62 → 0,78; «Части вычислительной машины (сервера)» — 8473 30 с 7-го места на 1-е.
+    Английские описания из инвойсов почти не выиграли — это не текст индекса, а язык запроса.
     """
-    by_code = {r["code"]: r for r in rows}
-    tws_chains = _load_tws_chains()
-
-    # Предки могут быть выше level>=3, поэтому названия берём из всей таблицы.
-    conn = sqlite3.connect(DB_PATH)
-    all_desc = dict(conn.execute("SELECT code, description FROM codes").fetchall())
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        desc = dict(conn.execute("SELECT code, description FROM codes").fetchall())
+    headings = {code: _short_name(d) for code, d in desc.items() if len(code) == 4 and d}
 
     texts = []
-    used_tws = 0
+    named = 0
     for row in rows:
-        code = row["code"]
-
-        # Цепочка из TWS полнее и свежее (редакция ГС-2022), поэтому в приоритете.
-        chain = tws_chains.get(code)
-        if chain:
-            texts.append(chain)
-            used_tws += 1
-            continue
-
-        parts: list[str] = []
-        for length in (2, 4, 6, 8, 10):
-            if len(code) < length:
-                continue
-            desc = all_desc.get(code[:length])
-            if not desc:
-                continue
-            desc = desc.strip()
-            # Названия разделов — это абзац канцелярита на 300+ знаков, одинаковый
-            # для всех кодов раздела. Целиком он забивает вектор и снижает
-            # различимость, поэтому каждый уровень подрезаем.
-            if len(desc) > LEVEL_TEXT_LIMIT:
-                desc = desc[:LEVEL_TEXT_LIMIT].rsplit(" ", 1)[0] + "…"
-            # не повторяем одно и то же название на соседних уровнях
-            if parts and desc.lower() == parts[-1].lower():
-                continue
-            parts.append(desc)
-
-        own = (by_code[code].get("description") or "").strip()
-        if own and (not parts or own.lower() != parts[-1].lower()):
-            parts.append(own)
-
-        if not parts:
-            parts = [(row["full_path"] or row["description"] or "").strip()]
-        texts.append(" → ".join(p for p in parts if p))
-
-    print(f"Текстов из цепочек TWS: {used_tws:,}, собрано из иерархии базы: "
-          f"{len(rows) - used_tws:,}")
+        path = (row["full_path"] or row["description"] or "").strip()
+        segs = [_case(s.strip()) for s in path.split(PATH_SEP) if s.strip()]
+        segs = [s for s, nxt in zip(segs, segs[1:] + [""]) if not (nxt and _near_dup(s, nxt))]
+        if len(segs) > 1:
+            group = segs[0].split(";")[0].strip(" ,.:")
+            if len(group) > GROUP_TEXT_LIMIT:
+                group = group[:GROUP_TEXT_LIMIT].rsplit(" ", 1)[0]
+            segs[0] = group
+        text = PATH_SEP.join(segs)
+        texts.append(PATH_SEP.join(_with_ref_names(s, headings, desc) for s in segs))
+        named += texts[-1] != text
+    print(f"Текстов: {len(texts):,}; с названием позиции у ссылки номером — {named:,}")
     return texts
 
 

@@ -87,8 +87,9 @@ def _parse_json_loose(raw: str) -> dict:
         raise
 
 
-async def llm_json(cfg: LLMConfig, system: str, user: str) -> dict:
-    """Запрос к нашей модели с response_format=json_object.
+async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None = None) -> dict:
+    """Запрос к нашей модели с response_format=json_object или, если дана schema, json_schema:
+    её vLLM держит при генерации, в том числе maxLength строк — жёсткий потолок длины.
 
     Любой непригодный ответ — отказ (LLMUnavailable → 503), а не пустой результат:
     таймаут, ошибка сервера, ответ обрезан по LLM_MAX_TOKENS, не JSON-объект.
@@ -109,7 +110,8 @@ async def llm_json(cfg: LLMConfig, system: str, user: str) -> dict:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            response_format={"type": "json_object"},
+            response_format=({"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
+                             if schema else {"type": "json_object"}),
             temperature=0.1,
             max_tokens=LLM_MAX_TOKENS,
             # Qwen3.x — без «размышлений», ответ сразу JSON. Иначе при reasoning-парсере
@@ -209,6 +211,56 @@ CLASSIFY_SYSTEM = """Ты эксперт-классификатор ТН ВЭД 
   "gri_applied": ["1", "3a"],
   "checks_required": ["..."]
 }"""
+
+# Ж: код первым, как в промпте, а длина текстов — потолок схемы (maxLength), который vLLM держит
+# при генерации. Без него classify после кода спорил с собой в reasoning («Но есть ли шанс…»,
+# «Значит, …») до 2048 токенов: холдинг после Д4 — 13 из 176 строк. Просьба рассуждать до кода
+# (6bbeea5) обрезку не сняла — спор уходил до кода, и код терялся совсем — и выборку ухудшила.
+REASONING_MAX = 700
+
+
+def _text(limit: int) -> dict:
+    return {"type": "string", "maxLength": limit}
+
+
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "primary": {
+            "type": "object",
+            "properties": {
+                "code": _text(20),
+                "reasoning": _text(REASONING_MAX),
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+            "required": ["code", "reasoning", "confidence"],
+            "additionalProperties": False,
+        },
+        "alternatives": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {"code": _text(20), "why_close": _text(300), "why_rejected": _text(300)},
+                "required": ["code", "why_close", "why_rejected"],
+                "additionalProperties": False,
+            },
+        },
+        "gri_applied": {"type": "array", "maxItems": 6, "items": _text(10)},
+        "checks_required": {"type": "array", "maxItems": 5, "items": _text(300)},
+    },
+    "required": ["primary", "alternatives", "gri_applied", "checks_required"],
+    "additionalProperties": False,
+}
+
+
+def _cut_to_sentence(text: str, limit: int) -> str:
+    """Текст, упёршийся в потолок схемы, — до конца последнего целого предложения, иначе с «…»."""
+    if len(text) < limit:
+        return text
+    end = max(text.rfind(". "), text.rfind(".\n"))
+    return text[:end + 1] if end > limit // 2 else text.rstrip() + "…"
+
 
 # Примечание 2 к разделу XVI — в промпт classify, когда среди кандидатов есть коды групп 84
 # или 85. Без него модель относила вентилятор к двигателям (8501), корпус сервера — к
@@ -592,7 +644,7 @@ async def classify(
         f"{_notes_for_prompt(candidates)}"
         f"{GRI_HINT_FOR_PROMPT}"
     )
-    result = await llm_json(cfg, CLASSIFY_SYSTEM, user)
+    result = await llm_json(cfg, CLASSIFY_SYSTEM, user, schema=CLASSIFY_SCHEMA)
 
     # Валидация: вместо объекта или списка модель может вернуть null или строку с кодом
     primary = result.get("primary")
@@ -601,6 +653,7 @@ async def classify(
     primary.setdefault("code", "")
     primary.setdefault("reasoning", "")
     primary.setdefault("confidence", "medium")
+    primary["reasoning"] = _cut_to_sentence(primary["reasoning"], REASONING_MAX)
     result["primary"] = primary
 
     for key in ("alternatives", "gri_applied", "checks_required"):

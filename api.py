@@ -449,10 +449,10 @@ def _chat_format_questions(triage_res: dict) -> str:
 
 
 async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
-    """Ход пользователя в чате. Как «один товар»: triage — только на первой реплике,
-    вторая — ответ на вопросы, и сразу classify с группой и позициями первого triage.
-    Не больше одного triage и одного classify на чат (B3: раньше triage шёл на каждом ходе
-    по всему накопленному описанию — токены росли квадратично).
+    """Ход пользователя в чате: один раунд вопросов. Первая реплика — triage; не хватает
+    деталей — вопросы. Вторая реплика — ответ: triage по описанию с ответом (группа и позиции,
+    без новых вопросов) и classify. Не больше двух triage и одного classify на чат
+    (B3: раньше до 6 ходов с triage на каждом по всему накопленному тексту).
     """
     store = _require_store()
     chat = state.chats[chat_id]
@@ -471,10 +471,14 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
             return _chat_snapshot(chat)
         description = chat["description"]
     else:
-        triage_res = chat["triage"]
-        asked = [q.get("question", "") for q in (triage_res.get("questions") or [])[:3]]
+        asked = [q.get("question", "") for q in (chat["triage"].get("questions") or [])[:3]]
         chat["answer"] = f"{chat.get('answer', '')}\n{text}".strip()
         description = merge_qa(chat["description"], [{"question": "; ".join(q for q in asked if q), "answer": chat["answer"]}])
+        # Группа и позиции — заново по описанию с ответом: первая реплика, по которой спрашивали,
+        # обычно слишком короткая («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
+        # Вопросы второго triage не задаются.
+        triage_res = await triage(store, description, cfg)
+        chat["triage_final"] = triage_res
 
     result = await classify(
         store,

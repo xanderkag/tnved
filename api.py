@@ -32,6 +32,7 @@ from classifier import (
     normalize_input,
     triage,
 )
+from embedder import EmbeddingsUnavailable
 from tnved_data import TNVEDStore
 
 BASE = Path(__file__).parent
@@ -146,6 +147,11 @@ async def refuse_llm_headers(request: Request, call_next):
 @app.exception_handler(LLMUnavailable)
 async def llm_unavailable(request: Request, exc: LLMUnavailable):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(EmbeddingsUnavailable)
+async def embeddings_unavailable(request: Request, exc: EmbeddingsUnavailable):
+    return JSONResponse(status_code=503, content={"detail": f"Векторный поиск недоступен: {exc}"})
 
 
 def _require_store() -> TNVEDStore:

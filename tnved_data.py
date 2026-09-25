@@ -41,7 +41,7 @@ def is_current_leaf(item: dict) -> bool:
 
 class TNVEDStore:
     lite: bool
-    embedder: Any  # SentenceTransformer | None
+    embedder: Any  # embedder.Embedder | None
     index: Any     # faiss.Index | None
     meta: list[dict]
     groups: list[dict]

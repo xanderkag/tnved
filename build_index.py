@@ -8,9 +8,11 @@
   data/tnved_meta.json       — список {code, description, full_path, ...}
   data/tnved_index_info.json — каким бэкендом и в какой размерности собран
 
-Векторизацией занимается embedder.py — либо bge-m3 на GPU-сервере через
-`/v1/embeddings` (быстро, ничего локально не нужно), либо локальная e5 на CPU.
-Выбор бэкенда — см. docstring embedder.py.
+Векторизацией занимается embedder.py — bge-m3 на GPU-сервере через
+`/v1/embeddings` (EMBEDDINGS_BASE_URL; быстро, ничего локально не нужно), либо,
+только явно, локальная e5 на CPU (EMBEDDER_BACKEND=local, requirements-e5.txt).
+Подробнее — docstring embedder.py. Индекс собирается здесь, заранее: при сборке
+Docker-образа он не строится, образ берёт готовые файлы из data/.
 
 Прогон разведён на два этапа, каждый в своём процессе:
   embed — считает векторы, пишет .npy
@@ -209,7 +211,11 @@ def stage_embed() -> None:
 
     backend = active_backend()
     if backend == "local" and EMBED_THREADS:
-        import torch
+        try:
+            import torch
+        except ImportError:
+            sys.exit("EMBEDDER_BACKEND=local: нужен sentence-transformers — "
+                     "pip install -r requirements-e5.txt")
 
         torch.set_num_threads(EMBED_THREADS)
 
@@ -311,6 +317,21 @@ def stage_index() -> None:
         print("Запустите: python build_index.py embed")
         sys.exit(1)
 
+    # В паспорт — модель, которая посчитала векторы (отпечаток этапа embed),
+    # а не та, что задана сейчас: `build_index.py index` с другими настройками
+    # записал бы чужое имя, и сверка паспорта на старте пропустила бы индекс.
+    built_by = None
+    if VECS_INFO_PATH.exists():
+        with open(VECS_INFO_PATH, encoding="utf-8") as f:
+            built_by = json.load(f).get("embedder")
+    if not built_by:
+        sys.exit(f"Нет отпечатка векторов ({VECS_INFO_PATH.name}) — неизвестно, какой моделью "
+                 f"они посчитаны. Пересчитайте: python build_index.py embed")
+    if built_by != expected_name():
+        print(f"ВНИМАНИЕ: векторы посчитаны моделью «{built_by}», а сейчас задана "
+              f"«{expected_name()}». Паспорт пишу по векторам; сервис с текущими "
+              f"настройками этот индекс не примет.")
+
     vecs = np.load(VECS_PATH)
     print(f"Строим FAISS-индекс (IndexFlatIP, dim={vecs.shape[1]}) ...")
     index = faiss.IndexFlatIP(vecs.shape[1])
@@ -322,7 +343,7 @@ def stage_index() -> None:
     # Паспорт индекса: чем собран и в какой размерности. Без него поиск другим
     # бэкендом искал бы в чужом векторном пространстве и молча врал.
     info = {
-        "embedder": expected_name(),
+        "embedder": built_by,
         "dim": int(vecs.shape[1]),
         "count": int(index.ntotal),
     }

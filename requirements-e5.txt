@@ -1,0 +1,4 @@
+# Локальная e5 на CPU — запасной путь векторизации, только явно (EMBEDDER_BACKEND=local).
+# В образ не входит: тянет torch (гигабайты), а рабочий путь — bge-m3 через EMBEDDINGS_BASE_URL.
+-r requirements.txt
+sentence-transformers>=2.2.2

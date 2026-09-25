@@ -22,6 +22,16 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-60}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      # Векторы запросов — bge-m3 на нашем сервере, той же моделью, что собран
+      # индекс (паспорт data/tnved_index_info.json). В полном режиме адрес
+      # обязателен: без него сервис в degraded, /health — 503. Здесь без `:?` —
+      # в LITE_MODE=1 векторы не нужны. EMBEDDER_BACKEND передаём, чтобы
+      # local из .env дал отказ (в образе нет e5), а не молча сменился на api.
+      EMBEDDER_BACKEND: ${EMBEDDER_BACKEND:-}
+      EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-bge-m3}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      EMBEDDINGS_TIMEOUT: ${EMBEDDINGS_TIMEOUT:-30}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s

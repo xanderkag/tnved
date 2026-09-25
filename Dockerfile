@@ -2,17 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# LITE_MODE=1 — пропускаем дорогие шаги (build_index.py + HF model preload).
-# Контейнер стартует с SQLite-only поиском кандидатов. Подходит для слабых
-# виртуалок без KVM, где build_index.py может крутиться час+.
+# LITE_MODE=1 — без FAISS: кандидаты из SQLite. Только проверить, что стек
+# поднимается; для прогонов не годится (см. .env.example).
 ARG LITE_MODE=0
 ENV LITE_MODE=${LITE_MODE}
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/app/.hf-cache \
-    SENTENCE_TRANSFORMERS_HOME=/app/.hf-cache \
-    TRANSFORMERS_OFFLINE=0
+    PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
@@ -33,19 +29,21 @@ RUN if [ ! -f data/tnved.db ]; then \
         echo "[build] data/tnved.db найден в build context, пропускаю fetch+parse" ; \
     fi
 
-# Шаг 2: FAISS-индекс + HF preload — только в полном режиме.
-# В lite-режиме поиск кандидатов идёт через SQLite, эмбеддер не нужен.
+# Шаг 2 (полный режим): FAISS-индекс — готовыми файлами из build context.
+# Внутри сборки его не строим: векторы считает bge-m3 на нашем сервере
+# (python build_index.py с EMBEDDINGS_BASE_URL), а у docker build этих
+# переменных нет. Локальную e5 в образ не кладём — ни модели, ни torch:
+# запросы векторизует тот же сервер, адрес — EMBEDDINGS_BASE_URL в .env.
+# Индекса нет — сборка падает с причиной, а не собирает его часами на CPU.
 RUN if [ "$LITE_MODE" = "1" ]; then \
-        echo "[build] LITE_MODE=1 — пропускаю build_index.py и HF preload" ; \
+        echo "[build] LITE_MODE=1 — индекс не нужен" ; \
+    elif [ -f data/tnved.faiss ] && [ -f data/tnved_meta.json ] && [ -f data/tnved_index_info.json ]; then \
+        echo "[build] индекс из build context: $(cat data/tnved_index_info.json | tr -d '\n ')" ; \
     else \
-        if [ ! -f data/tnved.faiss ] || [ ! -f data/tnved_meta.json ]; then \
-            echo "[build] FAISS отсутствует — собираю (медленно на слабом CPU)" \
-            && python build_index.py ; \
-        else \
-            echo "[build] FAISS уже в build context, пропускаю build_index.py" ; \
-        fi \
-        && echo "[build] прогреваю HF-кэш модели intfloat/multilingual-e5-base" \
-        && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-base')" ; \
+        echo "[build] ОШИБКА: нет data/tnved.faiss, tnved_meta.json или tnved_index_info.json." \
+             "Соберите индекс заранее (python build_index.py с EMBEDDINGS_BASE_URL)" \
+             "и положите файлы в data/ — или LITE_MODE=1 для проверки стека." >&2 ; \
+        exit 1 ; \
     fi
 
 EXPOSE 8000

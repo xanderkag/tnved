@@ -15,10 +15,14 @@ venv/
 # raw-источники (CSV+xlsx) не нужны в образе — данные уже в SQLite/FAISS
 data/raw/
 .hf-cache/
+# промежуточные векторы build_index.py (124 МБ) — индекс собран из них, в образе лишние
+data/tnved_vecs.npy
+data/tnved_vecs_info.json
+data/vecs_parts/
 
-# !! ВАЖНО: data/tnved.db, data/tnved.faiss, data/tnved_meta.json
-# теперь ИДУТ В ОБРАЗ — собраны локально и копируются через build context.
-# Если их нет — Dockerfile переключается на fallback (медленный) build_index.
+# !! ВАЖНО: data/tnved.db, data/tnved.faiss, data/tnved_meta.json,
+# data/tnved_index_info.json ИДУТ В ОБРАЗ — собраны заранее и копируются
+# через build context. В полном режиме без индекса сборка падает с причиной.
 
 # демо-сервер и фикстуры — только локально для превью без LLM
 demo_server.py

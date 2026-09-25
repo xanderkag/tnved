@@ -1,22 +1,26 @@
 """
-Векторизация текстов — два взаимозаменяемых бэкенда.
+Векторизация текстов — два бэкенда.
 
-**api** (основной): OpenAI-совместимый `POST /v1/embeddings`. Модель `bge-m3`
-крутится на GPU-сервере, считает минутами вместо часов и не требует ни torch,
-ни 1,1 ГБ модели внутри образа.
+**api** (рабочий): OpenAI-совместимый `POST /v1/embeddings`. Модель `bge-m3`
+крутится на нашем GPU-сервере, считает минутами вместо часов и не требует
+ни torch, ни 1,1 ГБ модели внутри образа.
 
 **local** (запасной): sentence-transformers с `intfloat/multilingual-e5-base`
-на CPU. Медленно (3–6 текстов/с) и на слабых хостах падает по памяти,
-но не зависит от внешнего сервиса.
+на CPU. Медленно (3–6 текстов/с) и на слабых хостах падает по памяти.
+Только явно — `EMBEDDER_BACKEND=local` — и после
+`pip install -r requirements-e5.txt`: в образ sentence-transformers и torch не входят.
 
-Бэкенд выбирается сам: если задан `EMBEDDINGS_BASE_URL` — берём api, иначе local.
-Явно переключить — `EMBEDDER_BACKEND=api|local`.
+Бэкенд по умолчанию — api, и адрес у него обязателен: без `EMBEDDINGS_BASE_URL`
+отказ. Раньше без адреса молча включалась e5 — в контейнере это скачивание
+модели с HuggingFace и индекс bge-m3 при запросах e5 (спасала только сверка
+паспорта индекса). Непонятное `EMBEDDER_BACKEND` — тоже отказ.
 
-Переменные окружения для api:
-    EMBEDDINGS_BASE_URL   адрес шлюза, например http://10.10.13.10:8085/v1
-    EMBEDDINGS_API_KEY    наш named-key
+Переменные окружения для api (пустая — как незаданная):
+    EMBEDDINGS_BASE_URL   адрес во внутренней сети, на kb-docker — см. .env.example
+    EMBEDDINGS_API_KEY    ключ, если сервер его требует (Ollama — без ключа)
     EMBEDDINGS_MODEL      имя модели, по умолчанию bge-m3
     EMBEDDINGS_BATCH      сколько текстов в одном запросе, по умолчанию 64
+    EMBEDDINGS_TIMEOUT    секунд на запрос, по умолчанию 30; попыток 3, потом отказ
 
 ВАЖНО: у бэкендов разная размерность вектора (bge-m3 — 1024, e5-base — 768)
 и разные требования к префиксам (e5 нужны «passage: » / «query: », bge-m3 — нет).
@@ -37,6 +41,15 @@ from netcheck import require_internal_url
 
 DEFAULT_API_MODEL = "bge-m3"
 DEFAULT_LOCAL_MODEL = "intfloat/multilingual-e5-base"
+
+
+class EmbeddingsUnavailable(RuntimeError):
+    """Сервер векторов не ответил. На локальную e5 не переключаемся — это отказ."""
+
+
+def _env(name: str, default: str) -> str:
+    """Пустая переменная — как незаданная: compose передаёт `${X:-}` пустой строкой."""
+    return os.environ.get(name, "").strip() or default
 
 
 class Embedder(Protocol):
@@ -67,18 +80,21 @@ class ApiEmbedder:
         base_url = os.environ.get("EMBEDDINGS_BASE_URL", "").strip()
         if not base_url:
             raise RuntimeError(
-                "EMBEDDINGS_BASE_URL не задан — не знаю, куда обращаться за векторами."
+                "EMBEDDINGS_BASE_URL не задан — не знаю, куда обращаться за векторами. "
+                "Локальная e5 — только явно: EMBEDDER_BACKEND=local"
             )
         # Сюда уходит описание товара (вектор запроса) — только во внутреннюю сеть.
         base_url = require_internal_url(base_url, "EMBEDDINGS_BASE_URL")
-        self.model = os.environ.get("EMBEDDINGS_MODEL", DEFAULT_API_MODEL)
-        self.batch = int(os.environ.get("EMBEDDINGS_BATCH", "64"))
+        self.model = _env("EMBEDDINGS_MODEL", DEFAULT_API_MODEL)
+        self.batch = int(_env("EMBEDDINGS_BATCH", "64"))
         self.name = f"api:{self.model}"
         self._client = OpenAI(
             base_url=base_url,
-            api_key=os.environ.get("EMBEDDINGS_API_KEY", "") or "EMPTY",
-            timeout=float(os.environ.get("EMBEDDINGS_TIMEOUT", "120")),
-            max_retries=3,
+            api_key=_env("EMBEDDINGS_API_KEY", "EMPTY"),
+            timeout=float(_env("EMBEDDINGS_TIMEOUT", "30")),
+            # Повторяем сами, в _retry. Повторы клиента поверх наших давали до 12
+            # попыток по 120 с — запрос при лежащем сервере висел до получаса.
+            max_retries=0,
         )
 
     def encode(self, texts: list[str], is_query: bool = False) -> np.ndarray:
@@ -101,17 +117,25 @@ class ApiEmbedder:
                 last = exc
                 if n + 1 < attempts:
                     time.sleep(2 * (n + 1))
-        raise RuntimeError(f"Не удалось получить векторы после {attempts} попыток: {last}")
+        raise EmbeddingsUnavailable(
+            f"Сервер векторов {self.model} не ответил за {attempts} попытки: {last}"
+        )
 
 
 class LocalEmbedder:
-    """Векторизация локальной моделью e5 (запасной путь)."""
+    """Векторизация локальной моделью e5 (запасной путь, только явно)."""
 
     def __init__(self) -> None:
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "EMBEDDER_BACKEND=local: нужен sentence-transformers — "
+                "pip install -r requirements-e5.txt (в образ он не входит)"
+            ) from exc
 
-        self.model_name = os.environ.get("EMBEDDINGS_MODEL", DEFAULT_LOCAL_MODEL)
-        self.batch = int(os.environ.get("EMBEDDINGS_BATCH", "32"))
+        self.model_name = _env("EMBEDDINGS_MODEL", DEFAULT_LOCAL_MODEL)
+        self.batch = int(_env("EMBEDDINGS_BATCH", "32"))
         self.name = f"local:{self.model_name}"
         self._model = SentenceTransformer(self.model_name)
 
@@ -129,10 +153,11 @@ class LocalEmbedder:
 
 
 def active_backend() -> str:
+    """api, если явно не сказано local. Непонятное значение — отказ, а не догадка."""
     explicit = os.environ.get("EMBEDDER_BACKEND", "").strip().lower()
-    if explicit in ("api", "local"):
-        return explicit
-    return "api" if os.environ.get("EMBEDDINGS_BASE_URL", "").strip() else "local"
+    if explicit not in ("", "api", "local"):
+        raise RuntimeError(f"EMBEDDER_BACKEND={explicit!r} не понимаю: допустимо api или local")
+    return explicit or "api"
 
 
 def get_embedder() -> Embedder:
@@ -143,5 +168,5 @@ def get_embedder() -> Embedder:
 def expected_name() -> str:
     """Имя бэкенда без его инициализации — для сверки с сохранённым индексом."""
     if active_backend() == "api":
-        return f"api:{os.environ.get('EMBEDDINGS_MODEL', DEFAULT_API_MODEL)}"
-    return f"local:{os.environ.get('EMBEDDINGS_MODEL', DEFAULT_LOCAL_MODEL)}"
+        return f"api:{_env('EMBEDDINGS_MODEL', DEFAULT_API_MODEL)}"
+    return f"local:{_env('EMBEDDINGS_MODEL', DEFAULT_LOCAL_MODEL)}"

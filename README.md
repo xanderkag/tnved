@@ -28,6 +28,7 @@ gri.py              # 9 ОПИ
 fetch_tnved.py      # download infoculture CSV + TWS.BY xlsx
 parse_tnved.py      # CSV+xlsx → SQLite (схема codes + meta)
 build_index.py      # векторы → FAISS + meta.json + паспорт индекса (какой моделью собран)
+check_embeddings.py # сверка сервера векторов с индексом — по самим векторам, не по имени
 demo_server.py      # ⚠️ mock-API для превью без LLM/FAISS (НЕ в Docker-образе)
 Dockerfile
 docker-compose.yml  # app + Caddy reverse-proxy на :8000
@@ -47,6 +48,8 @@ docker compose up -d --build
 ```
 
 Индекс в образе не считается: до сборки в `data/` должны лежать `tnved.db`, `tnved.faiss`, `tnved_meta.json` и `tnved_index_info.json` (`data/` в `.gitignore` — файлы переносятся отдельно). Без индекса полный билд падает с причиной; `LITE_MODE=1` собирается и без него. Нет `tnved.db` — билд сам скачает и разберёт справочник. torch и модель e5 в образ не входят.
+
+Сменили `EMBEDDINGS_BASE_URL` — `docker compose exec app python check_embeddings.py`. Паспорт индекса сверяет только имя модели, а у Ollama и vLLM оно одно (`bge-m3`); скрипт сравнивает сами векторы с записанными в индексе и отказывает, если косинус ниже 0,995.
 
 Healthcheck: `GET /health` (200 если store загружен, 503 в degraded-режиме). Контейнер сам рестартится при сломанной БД.
 
@@ -96,7 +99,7 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 | `LLM_API_KEY` | пусто | если vLLM запущен с `--api-key` |
 | `LLM_TIMEOUT` | `60` | сек на один вызов модели, без повторов. Замер 25.09 на qwen36-vllm: 5–30 с на вызов при 5 параллельных |
 | `LLM_MAX_TOKENS` | `2048` | потолок ответа; обрезанный ответ — отказ. Замер 25.09: ответ до ~900 токенов |
-| `EMBEDDINGS_BASE_URL` | — (обязательна в полном режиме) | OpenAI-совместимый `/v1/embeddings` во внутренней сети; на kb-docker — `http://10.10.28.10:11434/v1` (Ollama) |
+| `EMBEDDINGS_BASE_URL` | — (обязательна в полном режиме) | OpenAI-совместимый `/v1/embeddings` во внутренней сети; на kb-docker — `http://10.10.33.10:11434/v1` (vLLM; индекс собран на Ollama 10.10.28.10, векторы сверены 25.09) |
 | `EMBEDDINGS_MODEL` | `bge-m3` | должна совпасть с паспортом `data/tnved_index_info.json`, иначе сервис не стартует |
 | `EMBEDDINGS_API_KEY` | пусто | если сервер векторов требует ключ; Ollama — без ключа |
 | `EMBEDDINGS_TIMEOUT` | `30` | сек на запрос векторов; 3 попытки, потом 503 |

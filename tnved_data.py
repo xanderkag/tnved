@@ -284,6 +284,41 @@ class TNVEDStore:
             return "not_leaf", item
         return ("current" if is_current_leaf(item) else "retired"), item
 
+    def version(self) -> dict:
+        """Версия справочника: когда собрана база, на какую дату тариф, сколько 10-значных кодов.
+
+        tariff_as_of — «Актуальность данных» тарифа TWS.BY; её пишет parse_tnved.py, в базе
+        старой сборки её нет — тогда None, а не дата сборки вместо неё.
+        """
+        with sqlite3.connect(DB_PATH) as conn:
+            meta = dict(conn.execute("SELECT key, value FROM meta"))
+            total, current = conn.execute(
+                "SELECT count(*), sum(data_source IN (?, ?)) FROM codes WHERE level = 4", CURRENT_SOURCES
+            ).fetchone()
+        return {
+            "db_built_at": meta.get("built_at"),
+            "tariff_as_of": meta.get("tariff_as_of"),
+            "codes10": total,
+            "codes10_current": current,
+        }
+
+    def code_card(self, code: str) -> dict | None:
+        """Карточка кода для /api/codes/{code}: статус, путь, пошлина; None — кода нет."""
+        status, item = self.code_status(code)
+        if item is None:
+            return None
+        return {
+            "code": code,
+            "status": status,
+            "in_tariff": status == "current" if len(code) == 10 else None,
+            "name": item["description"],
+            "path": [p.strip() for p in (item["full_path"] or "").split("→") if p.strip()],
+            "hierarchy": self.hierarchy(code),
+            "duty_rate": item["duty_rate"],
+            "data_source": item["data_source"],
+            **self.version(),
+        }
+
     def group_info(self, group_code: str) -> dict | None:
         """Информация о группе (2 знака)."""
         with sqlite3.connect(DB_PATH) as conn:

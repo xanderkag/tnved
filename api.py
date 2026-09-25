@@ -294,6 +294,33 @@ async def health():
     }
 
 
+# ─── справочник ───────────────────────────────────────────────────────────────
+
+CODE_RE = re.compile(r"\d{2}|\d{4}|\d{6}|\d{8}|\d{10}")
+
+
+@app.get("/api/codes")
+async def codes_version():
+    """Версия справочника: дата сборки базы и тарифа, число кодов — чтобы потребитель видел, с чем сверяется."""
+    return _require_store().version()
+
+
+@app.get("/api/codes/{code}")
+async def code_card(code: str):
+    """Карточка кода: статус (current | retired | not_leaf), путь по дереву, пошлина.
+
+    Кода нет — 404, а не ближайший похожий: подставленный код хуже отказа.
+    """
+    store = _require_store()
+    code = re.sub(r"[\s.]", "", code)
+    if not CODE_RE.fullmatch(code):
+        raise HTTPException(400, "Код ТН ВЭД — 2, 4, 6, 8 или 10 цифр")
+    card = store.code_card(code)
+    if card is None:
+        raise HTTPException(404, f"Кода {code} нет в справочнике")
+    return card
+
+
 # ─── chat (свободный диалог) ──────────────────────────────────────────────────
 
 class ChatStartRequest(BaseModel):

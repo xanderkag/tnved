@@ -348,6 +348,24 @@ def load_tws() -> dict[str, dict]:
     return parse_tws(TWS_PATH)
 
 
+def tws_as_of() -> str | None:
+    """«Актуальность данных» тарифа TWS.BY (лист «Система TWS»), например «06.05.2026»; нет — None."""
+    if not TWS_PATH.exists():
+        return None
+    from openpyxl import load_workbook
+
+    wb = load_workbook(str(TWS_PATH), read_only=True, data_only=True)
+    try:
+        if "Система TWS" not in wb.sheetnames:
+            return None
+        for row in wb["Система TWS"].iter_rows(values_only=True):
+            if row and " ".join(str(row[0] or "").split()) == "Актуальность данных":
+                return " ".join(str(row[1] or "").split()) or None
+        return None
+    finally:
+        wb.close()
+
+
 # ─── DB ───────────────────────────────────────────────────────────────────────
 
 def merge_sources(hier: list[dict], tws: dict[str, dict]) -> list[dict]:
@@ -381,7 +399,7 @@ def merge_sources(hier: list[dict], tws: dict[str, dict]) -> list[dict]:
     return list(by_code.values())
 
 
-def save_to_db(rows: list[dict]):
+def save_to_db(rows: list[dict], tariff_as_of: str | None = None):
     # Собираем рядом и подменяем в конце: упавшая сборка не оставляет сервис без базы.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = DB_PATH.with_name(DB_PATH.name + ".tmp")
@@ -431,6 +449,8 @@ def save_to_db(rows: list[dict]):
     from datetime import datetime
     cur.execute("INSERT INTO meta VALUES (?,?)", ("built_at", datetime.utcnow().isoformat()))
     cur.execute("INSERT INTO meta VALUES (?,?)", ("total", str(len(records))))
+    if tariff_as_of:  # дата тарифа для /api/codes; без неё поле пустое, а не дата сборки
+        cur.execute("INSERT INTO meta VALUES (?,?)", ("tariff_as_of", tariff_as_of))
 
     conn.commit()
 
@@ -460,7 +480,7 @@ def main():
         print("Слишком мало записей после слияния — что-то пошло не так.")
         sys.exit(1)
 
-    save_to_db(rows)
+    save_to_db(rows, tariff_as_of=tws_as_of() if tws else None)
     print(f"\nГотово: {DB_PATH}")
     print("Следующий шаг: python build_index.py")
 

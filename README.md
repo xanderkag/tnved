@@ -126,6 +126,8 @@ venv/Scripts/python -m uvicorn demo_server:app --host 127.0.0.1 --port 8765
 | `POST` | `/api/chat/start` | Новый чат |
 | `POST` | `/api/chat/{id}/message` | Реплика в чат |
 | `GET`  | `/api/chat/{id}` | Снимок чата |
+| `GET`  | `/api/codes` | Версия справочника: `db_built_at`, `tariff_as_of`, `codes10`, `codes10_current` |
+| `GET`  | `/api/codes/{code}` | Карточка кода (2–10 цифр): `status` current / retired / not_leaf, `in_tariff`, `name`, `path` (уровни), `hierarchy`, `duty_rate`, версия. Нет кода — 404, не тот формат — 400 |
 | `GET`  | `/api/models` | `{model}` — какая модель отвечает (задаётся только на сервере) |
 | `GET`  | `/health` | 200 если store загружен, иначе 503 |
 

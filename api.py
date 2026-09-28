@@ -121,6 +121,12 @@ async def lifespan(app: FastAPI):
         print(f"[lifespan] FATAL: не смог загрузить TNVEDStore: {e}")
         print("[lifespan] сервер поднят в degraded-режиме: classify-эндпоинты будут отдавать 503")
         state.store = None
+    if state.decl is not None and state.store is not None and state.store.embedder is not None:
+        # векторы описаний ДТ — тем же сервером; не ответил — по описанию только дословно, видно в /health
+        try:
+            await asyncio.to_thread(state.decl.build_vectors, state.store.embedder)
+        except EmbeddingsUnavailable as e:
+            print(f"[decl] векторы описаний не построены, по описанию только дословно: {e}")
 
     cleanup_task = asyncio.create_task(_cleanup_loop())
     try:
@@ -302,6 +308,12 @@ async def health():
         "vectors": state.store.index_ntotal,
         "groups": len(state.store.groups),
         "static_version": STATIC_VER,
+        "declarations": None if state.decl is None else {
+            "rows": state.decl.rows,
+            "articles": len(state.decl.by_article),
+            "descriptions": len(state.decl.desc_keys),
+            "description_vectors": 0 if state.decl.desc_vecs is None else len(state.decl.desc_vecs),
+        },
     }
 
 
@@ -719,11 +731,12 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
     async def worker(idx: int, item: dict) -> None:
-        # Уровень 1: артикул есть в декларациях с одним действующим кодом — код оттуда, без модели.
+        # Уровень 1: артикул или описание есть в декларациях с одним действующим кодом — код оттуда, без модели.
         decl = None
-        if state.store is not None:
-            decl = declarations.batch_lookup(state.decl, state.store, item["article"], item["description"],
-                                             designation_only(item["description"]))
+        if state.store is not None and state.decl is not None:
+            decl = await asyncio.to_thread(
+                declarations.batch_lookup, state.decl, state.store, item["article"], item["description"],
+                designation_only(item["description"]), state.store.embedder)
         if decl and "result" in decl:
             job["results"][idx] = decl["result"]
             job["processed"] += 1
@@ -736,8 +749,8 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
         async with sem:
             try:
                 result = await _classify_one_for_batch(item["text"], cfg)
-                if decl and "check" in decl:
-                    result["checks_required"].insert(0, decl["check"])
+                if decl and "checks" in decl:
+                    result["checks_required"][:0] = decl["checks"]
                 job["results"][idx] = result
             except Exception as e:
                 job["results"][idx] = {"error": str(e)}

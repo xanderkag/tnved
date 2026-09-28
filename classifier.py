@@ -21,6 +21,7 @@ import time
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel
 
+from declarations import norm_description, parts_only
 from gri import GRI_HINT_FOR_PROMPT, gri_text
 from netcheck import require_internal_url
 from tnved_data import TNVEDStore
@@ -322,6 +323,9 @@ def normalize_input(simple_text: str | None, fields: dict | None) -> str:
 # описания прописными) или 3 буквы со строчной («лак», «бак»); «РС», «IP68», «Ф1Е» — не слова.
 DESIGNATION_ONLY = ("описание — только обозначение, без названия товара: по нему код не определить; "
                     "нужно наименование (что это за товар) или код по истории «артикул → код»")
+PARTS_ONLY = ("описание называет только «части / детали … для X», а не саму деталь: часть, которая сама по себе "
+              "товар другой позиции (резистор, конденсатор, винт), идёт в свою позицию (прим. 2 к разделу XVI, "
+              "прим. 2 к группе 90); нужно наименование детали")
 
 
 def designation_only(text: str) -> bool:
@@ -839,6 +843,10 @@ async def classify(
         # в пакет такие строки не доходят (отказ до модели); здесь — «один товар» и чат без ответов
         primary["confidence"] = "low"
         result["checks_required"].insert(0, f"Код — догадка: {DESIGNATION_ONLY}.")
+    elif parts_only(norm_description(description)) and primary["code"]:
+        # замер 28.09: на таких описаниях модель уверенно даёт «части прибора», а в ДТ — десятки кодов деталей
+        primary["confidence"] = "low"
+        result["checks_required"].insert(0, f"Код — догадка: {PARTS_ONLY}.")
     elif primary["code"]:
         _material_unstated(description, result)
 

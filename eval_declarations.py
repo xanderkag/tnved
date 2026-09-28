@@ -99,7 +99,8 @@ def measure(train: list[dict], test: list[dict], store, embedder=None,
         row = {"dt_number": r.get("dt_number"), "item_no": r.get("item_no") or "",
                "article": r.get("article") or "", "description": desc,
                "expected": expected, "designation": dsg, "path": "", "code": "",
-               "checks": 0, "examples": 0}
+               "checks": 0, "examples": 0,
+               "parts": declarations.parts_only(declarations.norm_description(desc))}
         if got and "result" in got:
             row["path"] = got["result"]["match"]
             row["code"] = got["result"]["primary"]["code"]
@@ -143,6 +144,7 @@ def measure(train: list[dict], test: list[dict], store, embedder=None,
         "with_checks": sum(1 for r in to_model if r["checks"]),
         "with_examples": sum(1 for r in to_model if r["examples"]),
         "designation_only": sum(1 for r in to_model if r["designation"]),
+        "parts_only": sum(1 for r in to_model if r["parts"] and not r["designation"]),
     }
     # артикул уже встречался в прошлых ДТ, но с другим кодом — переоформляли
     summary["article_code_changed"] = sum(
@@ -182,7 +184,7 @@ def print_report(s: dict) -> None:
               f"{pct(v['acc10']):>9}{'':>9}{pct(v['acc4']):>9}")
     m = s["to_model"]
     print(f"В модель: {m['rows']} (с проверкой по ДТ {m['with_checks']}, с примерами {m['with_examples']}, "
-          f"только обозначение {m['designation_only']}); артикул с другим кодом, чем в прошлых ДТ: "
+          f"только обозначение {m['designation_only']}, только части {m.get('parts_only', 0)}); артикул с другим кодом, чем в прошлых ДТ: "
           f"{s['article_code_changed']}")
     for t in s.get("thresholds", []):
         print(f"  порог {t['threshold']:.2f}: из {t['pool']} код по похожему описанию у {t['answered']}, "
@@ -209,7 +211,7 @@ def write_outputs(out: Path, stamp: str, summary: dict, rows: list[dict], train:
     wb = Workbook()
     wb.active.append(["Описание", "Код ТН ВЭД"])
     for r in rows:
-        if not r["code"] and not r["designation"]:
+        if not r["code"] and not r["designation"] and not r["parts"]:
             wb.active.append([r["description"], r["expected"]])
     wb.save(paths[3])
     return paths

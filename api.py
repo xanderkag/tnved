@@ -36,6 +36,7 @@ from classifier import (
     normalize_input,
     triage,
 )
+import declarations
 from embedder import EmbeddingsUnavailable
 from tnved_data import TNVEDStore
 
@@ -66,6 +67,7 @@ STATIC_VER = _compute_static_version()
 class App:
     llm: LLMConfig | None = None
     store: TNVEDStore | None = None
+    decl: declarations.DeclarationIndex | None = None  # уровень 1 — ДТ; None — выключен
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
     chats: dict[str, dict] = {}
@@ -108,6 +110,8 @@ async def lifespan(app: FastAPI):
     # Без нашей модели не стартуем: исключение отсюда останавливает uvicorn.
     state.llm = llm_config_from_env()
     print(f"Модель: {state.llm.model} @ {state.llm.base_url}")
+    # DECLARATIONS_PATH задан, а файл не читается — тоже не стартуем (исключение наружу).
+    state.decl = declarations.load_from_env()
     print("Загружаем ресурсы ТН ВЭД...")
     try:
         state.store = TNVEDStore()
@@ -715,6 +719,15 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
     async def worker(idx: int, item: dict) -> None:
+        # Уровень 1: артикул есть в декларациях с одним действующим кодом — код оттуда, без модели.
+        decl = None
+        if state.store is not None:
+            decl = declarations.batch_lookup(state.decl, state.store, item["article"], item["description"],
+                                             designation_only(item["description"]))
+        if decl and "result" in decl:
+            job["results"][idx] = decl["result"]
+            job["processed"] += 1
+            return
         if item.get("error"):  # строка без описания или слишком длинная — к модели не идёт
             job["results"][idx] = {"error": item["error"]}
             job["errors"].append({"row": item["row"], "error": item["error"]})
@@ -722,7 +735,10 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
             return
         async with sem:
             try:
-                job["results"][idx] = await _classify_one_for_batch(item["text"], cfg)
+                result = await _classify_one_for_batch(item["text"], cfg)
+                if decl and "check" in decl:
+                    result["checks_required"].insert(0, decl["check"])
+                job["results"][idx] = result
             except Exception as e:
                 job["results"][idx] = {"error": str(e)}
                 job["errors"].append({"row": item["row"], "error": str(e)})
@@ -820,15 +836,15 @@ async def classify_batch_download(job_id: str):
     ws.append([
         "Строка файла", "Описание", "Артикул", "Производитель", "Страна",
         "Код ТН ВЭД", "Наименование", "Пошлина", "Уверенность",
-        "Группа", "Альт. 1", "Альт. 1 пошлина", "Альт. 2", "Альт. 2 пошлина", "Проверить", "Ошибка",
+        "Группа", "Альт. 1", "Альт. 1 пошлина", "Альт. 2", "Альт. 2 пошлина", "Проверить", "Ошибка", "Источник",
     ])
     for item, r in zip(job["items"], job["results"]):
         source = [item["row"], item["description"], item["article"], item["manufacturer"], item["country"]]
         if r is None:
-            ws.append(source + [""] * 10 + ["обработка прервана"])
+            ws.append(source + [""] * 10 + ["обработка прервана", ""])
             continue
         if "error" in r:
-            ws.append(source + [""] * 10 + [r["error"]])
+            ws.append(source + [""] * 10 + [r["error"], ""])
             continue
         primary = r.get("primary") or {}
         alts = r.get("alternatives") or []
@@ -847,6 +863,7 @@ async def classify_batch_download(job_id: str):
             a2.get("duty_rate") or "",
             "\n".join(f"— {c}" for c in r.get("checks_required") or []),
             f"код не выдан: {primary['rejected']}" if primary.get("rejected") else "",
+            r.get("source") or ("модель" if primary.get("code") else ""),
         ])
 
     bio = BytesIO()

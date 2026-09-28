@@ -137,3 +137,57 @@ def load_from_env() -> DeclarationIndex | None:
         log.info("[decl] DECLARATIONS_PATH не задан — уровень деклараций выключен")
         return None
     return DeclarationIndex.load(path)
+
+
+def batch_lookup(index: DeclarationIndex | None, store, article: str, description: str,
+                 description_is_designation: bool) -> dict | None:
+    """Уровень 1 для строки пакета: результат в форме пакета, проверка для модели или None.
+
+    Ищем по колонке артикула (в ней может быть несколько значений через «; »), а если
+    описание — одно обозначение, то и по нему: в таких строках артикул стоит вместо названия.
+    {"result": {...}} — код из ДТ, модель не нужна; {"check": "..."} — артикул в ДТ есть,
+    но код не однозначен: пусть решает модель, а человек увидит, что было в ДТ.
+    """
+    if index is None:
+        return None
+    keys = [a for a in (article or "").split("; ") if a.strip()]
+    if description_is_designation:
+        keys.append(description)
+    miss = None
+    for key in keys:
+        found = index.lookup(key, store)
+        if found is None:
+            continue
+        if "code" in found:
+            return {"result": _result(found, store)}
+        miss = miss or found
+    if miss is None:
+        return None
+    codes = ", ".join(miss["codes"][:5])
+    if miss["miss"] == "код из декларации снят":
+        return {"check": f"В декларациях по артикулу {miss['article']} — код {codes}, он снят из тарифа: нужен новый код."}
+    return {"check": f"В декларациях по артикулу {miss['article']} — разные коды: {codes}; выбрать по описанию."}
+
+
+def _result(found: dict, store) -> dict:
+    code = found["code"]
+    meta = store.code_to_meta.get(code, {})
+    group = store.group_info(code[:2])
+    refs = "; ".join(f"ДТ {n} от {d}" if d else f"ДТ {n}" for n, d in found["dt_refs"])
+    checks = ["Код из декларации по совпавшему артикулу: убедиться, что товар тот же."]
+    if found["retired_codes"]:
+        checks.append(f"В прежних декларациях был и код {', '.join(found['retired_codes'])} — он снят из тарифа.")
+    return {
+        "group_code": code[:2],
+        "group_name": group["description"] if group else "",
+        "primary": {
+            "code": code,
+            "confidence": "high",
+            "reasoning": f"Артикул {found['article']} оформлен по этому коду: {refs} (строк в ДТ: {found['rows']}).",
+            "full_path": meta.get("full_path"),
+            "duty_rate": meta.get("duty_rate"),
+        },
+        "alternatives": [],
+        "checks_required": checks,
+        "source": f"декларации: {refs}",
+    }

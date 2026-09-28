@@ -450,10 +450,12 @@ async def triage(
     store: TNVEDStore,
     description: str,
     cfg: LLMConfig,
+    examples: list[dict] | None = None,
 ) -> dict:
-    """Определяет группу и набор уточняющих вопросов."""
+    """Определяет группу и набор уточняющих вопросов; examples — ближайшие строки ДТ холдинга."""
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
+        f"{_examples_for_prompt(examples, EXAMPLES_TRIAGE)}"
         f"ДОСТУПНЫЕ ГРУППЫ ТН ВЭД:\n{store.groups_list_for_prompt()}"
     )
     result = await llm_json(cfg, TRIAGE_SYSTEM, user)
@@ -721,7 +723,21 @@ def _subheading_rivals(store: TNVEDStore, result: dict) -> None:
 EXAMPLE_LIMIT = 200
 
 
-def _examples_for_prompt(examples: list[dict] | None) -> str:
+EXAMPLES_CLASSIFY = (
+    "коды есть среди кандидатов",
+    "Товар по сути тот же (назначение, устройство, материал) — это сильный довод за код декларации. "
+    "Отличается — код декларации не переноси, выбирай по ОПИ.",
+)
+# В triage — довод за группу и позицию: по короткому описанию группу модель ошибалась («лоток» → 39, а не 84),
+# а classify ищет кандидатов в группе и позициях triage.
+EXAMPLES_TRIAGE = (
+    "первые 4 знака кода — позиция",
+    "Товар по сути тот же (назначение, устройство, материал) — назови группу и позицию кода декларации "
+    "первой. Отличается — выбирай по описанию.",
+)
+
+
+def _examples_for_prompt(examples: list[dict] | None, kind: tuple[str, str] = EXAMPLES_CLASSIFY) -> str:
     """Как холдинг уже оформлял похожие товары — довод, а не ответ: товар может отличаться."""
     if not examples:
         return ""
@@ -731,10 +747,9 @@ def _examples_for_prompt(examples: list[dict] | None) -> str:
         for e in examples
     )
     return (
-        "КАК ОФОРМЛЯЛИ ПОХОЖИЕ ТОВАРЫ (декларации холдинга, выпущены таможней; коды есть среди кандидатов):\n"
+        f"КАК ОФОРМЛЯЛИ ПОХОЖИЕ ТОВАРЫ (декларации холдинга, выпущены таможней; {kind[0]}):\n"
         f"{lines}\n"
-        "Товар по сути тот же (назначение, устройство, материал) — это сильный довод за код декларации. "
-        "Отличается — код декларации не переноси, выбирай по ОПИ.\n\n"
+        f"{kind[1]}\n\n"
     )
 
 

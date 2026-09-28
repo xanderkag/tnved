@@ -54,3 +54,4 @@ exports/
 
 # Результаты eval.py — строки наборов с описаниями товаров, в git не кладём
 eval_results/
+incoming/

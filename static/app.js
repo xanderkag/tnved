@@ -227,7 +227,7 @@ function onCopyResult() {
 // ─── render: step 2 (triage) ─────────────────────────────────────────────────
 
 function renderTriageStep(data) {
-    const { group, completeness, missing_aspects, questions } = data;
+    const { group, completeness, missing_aspects, questions, declaration } = data;
     const completenessLabel = {
         high: "Высокая",
         medium: "Средняя",
@@ -264,7 +264,13 @@ function renderTriageStep(data) {
     const list = $("questions-list");
     list.innerHTML = "";
 
-    if (!questions || questions.length === 0) {
+    if (declaration) {
+        list.innerHTML = `
+            <div class="info-box">
+                Код найден в декларациях холдинга: ${escapeHtml(declaration.replace(/^декларации:\s*/, ""))}. Нажмите «Получить код».
+            </div>
+        `;
+    } else if (!questions || questions.length === 0) {
         list.innerHTML = `
             <div class="info-box">
                 Описания достаточно для классификации. Нажмите «Получить код» для финального результата.
@@ -399,6 +405,7 @@ function renderResultStep(data) {
             ${rejectedHtml}
 
             ${shortName ? `<div class="result-shortname">${escapeHtml(shortName)}</div>` : ""}
+            ${r.source ? `<div class="result-source">Источник: ${escapeHtml(r.source)}</div>` : ""}
 
             <details class="result-section result-reasoning" open>
                 <summary>Обоснование</summary>

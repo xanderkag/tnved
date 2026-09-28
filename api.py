@@ -199,6 +199,41 @@ def _llm() -> LLMConfig:
     return state.llm
 
 
+async def _declarations_first(text: str) -> dict | None:
+    """Уровень 1 для одного товара и чата — как в пакете, только колонки артикула нет:
+    описание-обозначение ищется как артикул, остальное — по описанию."""
+    if state.decl is None or state.store is None or not text:
+        return None
+    return await asyncio.to_thread(declarations.batch_lookup, state.decl, state.store, "", text,
+                                   designation_only(text), state.store.embedder)
+
+
+def _declaration_result(found: dict) -> dict:
+    """Код из ДТ в форме ответа classify: с иерархией кода, без кандидатов и ОПИ."""
+    code = found["primary"]["code"]
+    return {**found, "candidates": [], "gri_applied": [], "gri_explained": [],
+            "primary": {**found["primary"], "hierarchy": _require_store().hierarchy(code)}}
+
+
+def _declaration_triage(found: dict) -> dict:
+    """Код из ДТ есть — triage не нужен: группа по коду, вопросов нет."""
+    return {"group_code": found["group_code"], "group_name": found["group_name"],
+            "completeness": "high", "missing_aspects": [], "questions": []}
+
+
+async def _classify_with_declarations(store: TNVEDStore, description: str, triage_res: dict,
+                                      cfg: LLMConfig, decl: dict | None) -> dict:
+    """classify с примерами из ДТ; что было в ДТ — первым в «проверить»."""
+    examples = decl["examples"] if decl else []
+    result = await classify(store, description=description, group_code=triage_res.get("group_code", ""),
+                            cfg=cfg, headings=triage_res.get("headings"), examples=examples)
+    if decl:
+        result["checks_required"][:0] = decl["checks"]
+    if examples:
+        result["source"] = f"модель, примеры из ДТ: {len(examples)}"
+    return result
+
+
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.post("/api/classify/start")
@@ -216,7 +251,15 @@ async def classify_start(
             f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)",
         )
 
-    triage_result = await triage(store, description, cfg)
+    # Уровень 1 — ДТ. В подробной форме ищем по наименованию: «Поле: значение» построчно
+    # с описаниями из ДТ не сравнить.
+    decl_text = description if (req.description or "").strip() else \
+        str((req.fields or {}).get("Полное наименование") or "").strip()
+    decl = await _declarations_first(decl_text)
+    if decl and "result" in decl:
+        triage_result = _declaration_triage(decl["result"])
+    else:
+        triage_result = await triage(store, description, cfg)
 
     session_id = uuid.uuid4().hex[:12]
     state.sessions[session_id] = {
@@ -226,6 +269,7 @@ async def classify_start(
         "description": description,
         "llm_model": cfg.model,
         "triage": triage_result,
+        "decl": decl,
     }
 
     return {
@@ -238,6 +282,7 @@ async def classify_start(
         "completeness": triage_result.get("completeness", "low"),
         "missing_aspects": triage_result.get("missing_aspects", []),
         "questions": triage_result.get("questions", []),
+        "declaration": decl["result"]["source"] if decl and "result" in decl else None,
     }
 
 
@@ -254,20 +299,17 @@ async def classify_finalize(
     answers = [a.model_dump() for a in req.answers if a.answer.strip()]
     description = merge_qa(session["description"], answers)
     triage_res = session["triage"]
-    if answers:
-        # Группа и позиции — заново по описанию с ответами, как в чате: описание, по которому
-        # спрашивали, обычно слишком короткое («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
-        # Вопросы второго triage не задаются.
-        triage_res = await triage(store, description, cfg)
-        session["triage_final"] = triage_res
-
-    result = await classify(
-        store,
-        description=description,
-        group_code=triage_res.get("group_code", ""),
-        cfg=cfg,
-        headings=triage_res.get("headings"),
-    )
+    decl = session.get("decl")
+    if decl and "result" in decl:  # код из ДТ найден на старте — модель не нужна
+        result = _declaration_result(decl["result"])
+    else:
+        if answers:
+            # Группа и позиции — заново по описанию с ответами, как в чате: описание, по которому
+            # спрашивали, обычно слишком короткое («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
+            # Вопросы второго triage не задаются.
+            triage_res = await triage(store, description, cfg)
+            session["triage_final"] = triage_res
+        result = await _classify_with_declarations(store, description, triage_res, cfg, decl)
 
     session["answers"] = answers
     session["full_description"] = description
@@ -425,6 +467,8 @@ def _chat_format_finalization(triage_res: dict, classify_res: dict) -> str:
     if full_path:
         lines.append(f"_{full_path}_")
     lines.append(f"**Пошлина:** {duty}  **Уверенность:** {conf}")
+    if classify_res.get("source"):
+        lines.append(f"**Источник:** {classify_res['source']}")
     if reasoning:
         lines.append("")
         lines.append(reasoning)
@@ -481,8 +525,15 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
     chat["messages"].append({"role": "user", "content": text})
 
     # Модель не ответила (503) — реплика остаётся в чате; повтор дописывается к ней, а не заменяет
+    decl = chat.get("decl")
     if chat["triage"] is None:
         chat["description"] = f"{chat['description']}\n{text}".strip()
+        # Уровень 1 — ДТ: код нашёлся — сразу ответ, без вопросов и модели
+        decl = chat["decl"] = await _declarations_first(chat["description"])
+        if decl and "result" in decl:
+            result = _declaration_result(decl["result"])
+            chat["triage"] = _declaration_triage(decl["result"])
+            return _chat_finalize(chat, chat["description"], chat["triage"], result)
         triage_res = await triage(store, chat["description"], cfg)
         chat["triage"] = triage_res
         if triage_res.get("completeness", "low") != "high" and triage_res.get("questions"):
@@ -502,13 +553,11 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
         triage_res = await triage(store, description, cfg)
         chat["triage_final"] = triage_res
 
-    result = await classify(
-        store,
-        description=description,
-        group_code=triage_res.get("group_code", ""),
-        cfg=cfg,
-        headings=triage_res.get("headings"),
-    )
+    result = await _classify_with_declarations(store, description, triage_res, cfg, decl)
+    return _chat_finalize(chat, description, triage_res, result)
+
+
+def _chat_finalize(chat: dict, description: str, triage_res: dict, result: dict) -> dict:
     chat["full_description"] = description
     chat["result"] = result
     chat["phase"] = "finalized"

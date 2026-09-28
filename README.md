@@ -30,6 +30,8 @@ fetch_tnved.py      # download infoculture CSV + TWS.BY xlsx
 parse_tnved.py      # CSV+xlsx → SQLite (схема codes + meta)
 build_index.py      # векторы → FAISS + meta.json + паспорт индекса (какой моделью собран)
 check_embeddings.py # сверка сервера векторов с индексом — по самим векторам, не по имени
+declarations.py     # уровень 1: коды из деклараций холдинга (артикул, описание, примеры)
+eval_declarations.py # замер уровня 1 на отложенной части ДТ (по номерам ДТ); свод и xlsx для eval.py
 demo_server.py      # ⚠️ mock-API для превью без LLM/FAISS (НЕ в Docker-образе)
 Dockerfile
 constraints.txt     # версии пакетов, с которыми образ проверен на kb-docker (pip freeze)

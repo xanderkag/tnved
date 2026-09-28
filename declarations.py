@@ -144,17 +144,7 @@ class DeclarationIndex:
     @classmethod
     def load(cls, path: str | Path, **settings) -> "DeclarationIndex":
         path = Path(path)
-        raw = path.read_bytes()
-        if path.suffix == ".gz":
-            raw = gzip.decompress(raw)
-        text = raw.decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(text), delimiter=";")
-        header = [h.strip() for h in reader.fieldnames or []]
-        missing = [c for c in REQUIRED if c not in header]
-        if missing:
-            raise ValueError(f"{path.name}: нет колонок {', '.join(missing)} (есть: {', '.join(header)})")
-        rows = [{(k or "").strip(): v for k, v in r.items()} for r in reader]
-        index = cls(rows, **settings)
+        index = cls(read_rows(path), **settings)
         log.info("[decl] %s: строк %d, артикулов %d, описаний %d, пропущено %s",
                  path.name, index.rows, len(index.by_article), len(index.desc_keys), dict(index.skipped) or 0)
         return index
@@ -266,6 +256,20 @@ def _pick(entry: _Article, store) -> dict:
     }
 
 
+def read_rows(path: str | Path) -> list[dict]:
+    """Строки выгрузки (CSV «;», UTF-8, можно .gz); нет нужных колонок — ValueError."""
+    path = Path(path)
+    raw = path.read_bytes()
+    if path.suffix == ".gz":
+        raw = gzip.decompress(raw)
+    reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")), delimiter=";")
+    header = [h.strip() for h in reader.fieldnames or []]
+    missing = [c for c in REQUIRED if c not in header]
+    if missing:
+        raise ValueError(f"{path.name}: нет колонок {', '.join(missing)} (есть: {', '.join(header)})")
+    return [{(k or "").strip(): v for k, v in r.items()} for r in reader]
+
+
 def load_from_env() -> DeclarationIndex | None:
     """DECLARATIONS_PATH не задан — None (уровень выключен); задан и не читается — исключение."""
     path = os.environ.get("DECLARATIONS_PATH", "").strip()
@@ -327,12 +331,14 @@ def _result(found: dict, store) -> dict:
         why = f"Артикул {found['article']} оформлен по этому коду"
         checks = ["Код из декларации по совпавшему артикулу: убедиться, что товар тот же."]
         confidence = "high"
+        match = "article"
     else:
         exact = found["sim"] >= 1.0
         why = f"Описание «{found['similar']}» " + ("" if exact else f"(сходство {found['sim']}) ") + "оформлено по этому коду"
         checks = ["Код из декларации по " + ("такому же" if exact else "похожему") + " описанию: сверить, что товар тот же."]
         # одна строка ДТ по похожему, а не такому же описанию — ещё не практика оформления
         confidence = "high" if exact or found["rows"] >= 2 else "medium"
+        match = "description" if exact else "similar"
     if found["retired_codes"]:
         checks.append(f"В прежних декларациях был и код {', '.join(found['retired_codes'])} — он снят из тарифа.")
     return {
@@ -348,4 +354,5 @@ def _result(found: dict, store) -> dict:
         "alternatives": [],
         "checks_required": checks,
         "source": f"декларации: {refs}",
+        "match": match,  # по чему совпало: article / description / similar — для замера
     }

@@ -5,7 +5,9 @@
 код и ссылку на ДТ, модель не зовём.
 
 Данные — выгрузка SLAI (Q-VYGRUZKA-DT-ARTIKUL-KOD-1): CSV «;», UTF-8 (можно .gz), колонки
-article, description, hs_code, dt_number, dt_date (item_no — если есть). Код взят у товара
+article, description, hs_code, dt_number, dt_date (item_no, marking — если есть). Маркировка —
+второй ключ артикула: у части строк артикула нет, а маркировка и есть обозначение товара
+(замер 28.09: на поздних ДТ +51 строка с кодом, все верны). Код взят у товара
 ДТ (гр. 33), артикул — у строки товара: так их разводит разбор SLAI. Файл в git и образ не
 входит (incoming/, data/).
 
@@ -126,7 +128,8 @@ class DeclarationIndex:
     """Свод «артикул → коды из ДТ» по выгрузке."""
 
     def __init__(self, rows: list[dict], near_min: float = NEAR_MIN_DEFAULT,
-                 examples_k: int = EXAMPLES_DEFAULT, example_min: float = EXAMPLE_MIN_DEFAULT):
+                 examples_k: int = EXAMPLES_DEFAULT, example_min: float = EXAMPLE_MIN_DEFAULT,
+                 markings: bool = True):
         self.by_article: dict[str, _Article] = defaultdict(_Article)
         self.by_description: dict[str, _Article] = defaultdict(_Article)
         self.rows = 0
@@ -146,11 +149,12 @@ class DeclarationIndex:
             desc = norm_description(row.get("description"))
             if desc:  # по описанию ищем и строки без артикула
                 _add(self.by_description[desc], code, ref)
-            art = norm_article(row.get("article"))
-            if not art:
+            keys = {norm_article(row.get("article")), norm_article(row.get("marking")) if markings else ""} - {""}
+            if not keys:
                 self.skipped["нет артикула"] += 1
                 continue
-            _add(self.by_article[art], code, ref)
+            for art in keys:
+                _add(self.by_article[art], code, ref)
             self.rows += 1
         self.desc_keys = list(self.by_description)
 

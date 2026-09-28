@@ -83,9 +83,13 @@ def split(rows: list[dict], holdout: float, mode: str, seed: int) -> tuple[list[
 
 
 def measure(train: list[dict], test: list[dict], store, embedder=None,
-            thresholds: tuple[float, ...] = ()) -> tuple[dict, list[dict]]:
-    """Уровень 1 по отложенным строкам: сводка и построчные исходы."""
-    index = declarations.DeclarationIndex(train)
+            thresholds: tuple[float, ...] = (), markings: bool = True) -> tuple[dict, list[dict]]:
+    """Уровень 1 по отложенным строкам: сводка и построчные исходы.
+
+    markings — маркировка второй ключ артикула: и в своде, и в запросе (как если бы в колонке
+    «Артикул» пакета стояли оба значения); False — как до 28.09, для сравнения.
+    """
+    index = declarations.DeclarationIndex(train, markings=markings)
     if embedder is not None:
         index.build_vectors(embedder)
     out_rows = []
@@ -95,7 +99,9 @@ def measure(train: list[dict], test: list[dict], store, embedder=None,
             continue
         desc = (r.get("description") or "").strip()
         dsg = designation_only(desc)
-        got = declarations.batch_lookup(index, store, r.get("article") or "", desc, dsg, embedder)
+        keys = [r.get("article") or ""] + ([r.get("marking") or ""] if markings else [])
+        query = "; ".join(dict.fromkeys(k.strip() for k in keys if k.strip()))
+        got = declarations.batch_lookup(index, store, query, desc, dsg, embedder)
         row = {"dt_number": r.get("dt_number"), "item_no": r.get("item_no") or "",
                "article": r.get("article") or "", "description": desc,
                "expected": expected, "designation": dsg, "path": "", "code": "",
@@ -224,6 +230,7 @@ def main() -> None:
     ap.add_argument("--split", choices=("date", "hash"), default="date", help="date — самые поздние ДТ (по умолчанию)")
     ap.add_argument("--seed", type=int, default=1, help="для --split hash")
     ap.add_argument("--vectors", action="store_true", help="похожие описания: сервер векторов из env")
+    ap.add_argument("--no-marking", action="store_true", help="без маркировки как второго артикула (для сравнения)")
     ap.add_argument("--out", type=Path, default=Path("eval_results"))
     args = ap.parse_args()
     if not 0 < args.holdout < 1:
@@ -239,8 +246,9 @@ def main() -> None:
     if args.vectors:
         from embedder import get_embedder
         embedder = get_embedder()
-    summary, out_rows = measure(train, test, TNVEDStore(), embedder, THRESHOLDS if args.vectors else ())
-    summary.update(export=args.export.name, split=args.split, holdout=args.holdout)
+    summary, out_rows = measure(train, test, TNVEDStore(), embedder, THRESHOLDS if args.vectors else (),
+                                markings=not args.no_marking)
+    summary.update(export=args.export.name, split=args.split, holdout=args.holdout, markings=not args.no_marking)
     print_report(summary)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     for p in write_outputs(args.out, stamp, summary, out_rows, train):

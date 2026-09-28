@@ -718,6 +718,26 @@ def _subheading_rivals(store: TNVEDStore, result: dict) -> None:
     result["checks_required"].append(f"Подпозиция по описанию не бесспорна: {parts}. Сверить признак с товаром.")
 
 
+EXAMPLE_LIMIT = 200
+
+
+def _examples_for_prompt(examples: list[dict] | None) -> str:
+    """Как холдинг уже оформлял похожие товары — довод, а не ответ: товар может отличаться."""
+    if not examples:
+        return ""
+    lines = "\n".join(
+        f"  - «{_cut_level(e['description'], EXAMPLE_LIMIT)}» → {e['code']}"
+        + (f" (строк в ДТ: {e['rows']})" if e["rows"] > 1 else "")
+        for e in examples
+    )
+    return (
+        "КАК ОФОРМЛЯЛИ ПОХОЖИЕ ТОВАРЫ (декларации холдинга, выпущены таможней; коды есть среди кандидатов):\n"
+        f"{lines}\n"
+        "Товар по сути тот же (назначение, устройство, материал) — это сильный довод за код декларации. "
+        "Отличается — код декларации не переноси, выбирай по ОПИ.\n\n"
+    )
+
+
 async def classify(
     store: TNVEDStore,
     description: str,
@@ -725,8 +745,13 @@ async def classify(
     cfg: LLMConfig,
     top_k: int = 12,
     headings: list[str] | None = None,
+    examples: list[dict] | None = None,
 ) -> dict:
-    """Финальная классификация: кандидаты из группы и из позиций triage, LLM выбирает код."""
+    """Финальная классификация: кандидаты из группы и из позиций triage, LLM выбирает код.
+
+    examples — ближайшие строки деклараций холдинга (declarations.examples): их коды добавляются
+    в кандидаты, а сами строки — в промпт примерами.
+    """
     # В lite-режиме store игнорирует top_k и отдаёт LITE_TOP_K листьев группы;
     # в полном режиме это векторный поиск (CPU-bound, поэтому в to_thread).
     candidates = await asyncio.to_thread(
@@ -749,6 +774,11 @@ async def classify(
             if c["code"] not in have:
                 have.add(c["code"])
                 candidates.append(c)
+    # коды из деклараций — в кандидаты, иначе модели нельзя их выбрать (код только из списка)
+    for ex in examples or []:
+        if ex["code"] not in have and ex["code"] in store.code_to_meta:
+            have.add(ex["code"])
+            candidates.append({**store.code_to_meta[ex["code"]], "score": 0.0})
 
     candidates_text = "\n".join(
         f"  {i+1}. [{c['code']}] {_path_for_prompt(c, group_code)}"
@@ -764,6 +794,7 @@ async def classify(
         f"ОПРЕДЕЛЁННАЯ ГРУППА: {group_line}\n\n"
         f"{headings_line}"
         f"КАНДИДАТЫ:\n{candidates_text}\n\n"
+        f"{_examples_for_prompt(examples)}"
         f"{_notes_for_prompt(candidates)}"
         f"{GRI_HINT_FOR_PROMPT}"
     )

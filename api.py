@@ -711,12 +711,12 @@ def _read_batch_items(rows: list[tuple]) -> tuple[list[dict], dict]:
     return items, columns
 
 
-async def _classify_one_for_batch(description: str, cfg: LLMConfig) -> dict:
-    """В батче пропускаем уточнения: триаж → классификация на исходном описании."""
+async def _classify_one_for_batch(description: str, cfg: LLMConfig, examples: list[dict] | None = None) -> dict:
+    """В батче пропускаем уточнения: триаж → классификация на исходном описании (+ примеры из ДТ)."""
     store = _require_store()
     triage_result = await triage(store, description, cfg)
     result = await classify(store, description, triage_result.get("group_code", ""), cfg=cfg,
-                            headings=triage_result.get("headings"))
+                            headings=triage_result.get("headings"), examples=examples)
     return {
         "group_code": result["group_code"],
         "group_name": result["group_name"],
@@ -748,9 +748,12 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
             return
         async with sem:
             try:
-                result = await _classify_one_for_batch(item["text"], cfg)
-                if decl and "checks" in decl:
+                examples = decl["examples"] if decl else []
+                result = await _classify_one_for_batch(item["text"], cfg, examples)
+                if decl:
                     result["checks_required"][:0] = decl["checks"]
+                if examples:
+                    result["source"] = f"модель, примеры из ДТ: {len(examples)}"
                 job["results"][idx] = result
             except Exception as e:
                 job["results"][idx] = {"error": str(e)}

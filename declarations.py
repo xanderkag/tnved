@@ -19,6 +19,10 @@ article, description, hs_code, dt_number, dt_date (item_no — если есть
 DECLARATIONS_NEAR_MIN (по умолчанию 0.93, уточнить замером) оформлены одним действующим
 кодом. Разошлись — код не выбираем, строка идёт в модель с проверкой. Описание из одного
 слова или только обозначение — по описанию не ищем: слишком общее.
+
+Третий ход — код не выбран: ближайшие описания ДТ (выше DECLARATIONS_EXAMPLE_MIN, до
+DECLARATIONS_EXAMPLES штук) с действующими кодами уходят модели примерами, а их коды — в
+кандидаты: модель видит, как похожие товары уже оформляли, но решает сама.
 """
 from __future__ import annotations
 
@@ -46,6 +50,8 @@ _NOT_ARTICLE = re.compile(r"^(?:БH|BH|HET|NONE|NA|0+)$")
 MIN_ARTICLE = 3
 NEAR_MIN_DEFAULT = 0.93
 NEAR_TOP_K = 5
+EXAMPLES_DEFAULT = 5
+EXAMPLE_MIN_DEFAULT = 0.80
 MIN_DESCRIPTION_WORDS = 2
 _WORDS = re.compile(r"\w+")
 
@@ -72,15 +78,29 @@ def norm_description(raw: object) -> str:
     return s if len(_WORDS.findall(s)) >= MIN_DESCRIPTION_WORDS else ""
 
 
-def near_min_from_env() -> float:
-    """Порог сходства описаний; задан и не число из (0, 1] — отказ, а не тихое значение по умолчанию."""
-    raw = os.environ.get("DECLARATIONS_NEAR_MIN", "").strip()
+def _threshold_from_env(name: str, default: float) -> float:
+    """Порог сходства из env; задан и не число из (0, 1] — отказ, а не тихое значение по умолчанию."""
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return NEAR_MIN_DEFAULT
+        return default
     value = float(raw)
     if not 0 < value <= 1:
-        raise ValueError(f"DECLARATIONS_NEAR_MIN={raw}: нужно число из (0, 1]")
+        raise ValueError(f"{name}={raw}: нужно число из (0, 1]")
     return value
+
+
+def near_min_from_env() -> float:
+    return _threshold_from_env("DECLARATIONS_NEAR_MIN", NEAR_MIN_DEFAULT)
+
+
+def settings_from_env() -> dict:
+    """Пороги и число примеров; неприменимое значение — ValueError, сервис не стартует."""
+    raw = os.environ.get("DECLARATIONS_EXAMPLES", "").strip()
+    examples_k = int(raw) if raw else EXAMPLES_DEFAULT
+    if not 0 <= examples_k <= 20:
+        raise ValueError(f"DECLARATIONS_EXAMPLES={raw}: нужно целое от 0 до 20")
+    return {"near_min": near_min_from_env(), "examples_k": examples_k,
+            "example_min": _threshold_from_env("DECLARATIONS_EXAMPLE_MIN", EXAMPLE_MIN_DEFAULT)}
 
 
 @dataclass
@@ -92,12 +112,16 @@ class _Article:
 class DeclarationIndex:
     """Свод «артикул → коды из ДТ» по выгрузке."""
 
-    def __init__(self, rows: list[dict], near_min: float = NEAR_MIN_DEFAULT):
+    def __init__(self, rows: list[dict], near_min: float = NEAR_MIN_DEFAULT,
+                 examples_k: int = EXAMPLES_DEFAULT, example_min: float = EXAMPLE_MIN_DEFAULT):
         self.by_article: dict[str, _Article] = defaultdict(_Article)
         self.by_description: dict[str, _Article] = defaultdict(_Article)
         self.rows = 0
         self.skipped = Counter()
         self.near_min = near_min
+        self.examples_k = examples_k
+        self.example_min = example_min
+        self._last_query: tuple[str, np.ndarray] | None = None  # near и examples по одной строке — один запрос
         self.desc_keys: list[str] = []
         self.desc_vecs: np.ndarray | None = None  # build_vectors; None — по описанию только дословно
         for row in rows:
@@ -118,7 +142,7 @@ class DeclarationIndex:
         self.desc_keys = list(self.by_description)
 
     @classmethod
-    def load(cls, path: str | Path, near_min: float = NEAR_MIN_DEFAULT) -> "DeclarationIndex":
+    def load(cls, path: str | Path, **settings) -> "DeclarationIndex":
         path = Path(path)
         raw = path.read_bytes()
         if path.suffix == ".gz":
@@ -130,7 +154,7 @@ class DeclarationIndex:
         if missing:
             raise ValueError(f"{path.name}: нет колонок {', '.join(missing)} (есть: {', '.join(header)})")
         rows = [{(k or "").strip(): v for k, v in r.items()} for r in reader]
-        index = cls(rows, near_min)
+        index = cls(rows, **settings)
         log.info("[decl] %s: строк %d, артикулов %d, описаний %d, пропущено %s",
                  path.name, index.rows, len(index.by_article), len(index.desc_keys), dict(index.skipped) or 0)
         return index
@@ -153,13 +177,8 @@ class DeclarationIndex:
             return None
         if desc in self.by_description:
             hits = [(desc, 1.0)]
-        elif self.desc_vecs is not None and embedder is not None:
-            q = embedder.encode([desc])[0]
-            sims = self.desc_vecs @ q
-            top = np.argsort(-sims)[:NEAR_TOP_K]
-            hits = [(self.desc_keys[i], float(sims[i])) for i in top if sims[i] >= self.near_min]
         else:
-            hits = []
+            hits = self._similar(desc, embedder, self.near_min, NEAR_TOP_K)
         if not hits:
             return None
         merged = _Article()
@@ -173,6 +192,38 @@ class DeclarationIndex:
         found = _pick(merged, store)
         found.update(similar=hits[0][0], sim=round(hits[0][1], 3))
         return found
+
+    def examples(self, description: object, store, embedder=None) -> list[dict]:
+        """Ближайшие описания ДТ с действующими кодами — примеры для модели.
+
+        [{"description", "code", "rows", "sim"}]: такое же описание первым, дальше по сходству
+        не ниже example_min; не больше examples_k. Снятые коды не показываем: их выбирать нельзя.
+        """
+        desc = norm_description(description)
+        if not desc or not self.examples_k:
+            return []
+        hits = [(desc, 1.0)] if desc in self.by_description else []
+        hits += [h for h in self._similar(desc, embedder, self.example_min, self.examples_k + 1) if h[0] != desc]
+        out = []
+        for key, sim in hits:
+            for code, n in self.by_description[key].codes.most_common():
+                if store.code_status(code)[0] == "current":
+                    out.append({"description": key, "code": code, "rows": n, "sim": round(sim, 3)})
+        return out[:self.examples_k]
+
+    def _similar(self, desc: str, embedder, floor: float, k: int) -> list[tuple[str, float]]:
+        """k ближайших описаний ДТ со сходством не ниже floor; векторов нет — пусто."""
+        if self.desc_vecs is None or embedder is None:
+            return []
+        last = self._last_query
+        if last is not None and last[0] == desc:
+            q = last[1]
+        else:
+            q = embedder.encode([desc])[0]
+            self._last_query = (desc, q)
+        sims = self.desc_vecs @ q
+        top = np.argsort(-sims)[:k]
+        return [(self.desc_keys[i], float(sims[i])) for i in top if sims[i] >= floor]
 
     def lookup(self, article: object, store) -> dict | None:
         """Код по артикулу, если декларации однозначны; иначе None и причина в "miss".
@@ -221,7 +272,7 @@ def load_from_env() -> DeclarationIndex | None:
     if not path:
         log.info("[decl] DECLARATIONS_PATH не задан — уровень деклараций выключен")
         return None
-    return DeclarationIndex.load(path, near_min_from_env())
+    return DeclarationIndex.load(path, **settings_from_env())
 
 
 def batch_lookup(index: DeclarationIndex | None, store, article: str, description: str,
@@ -231,7 +282,8 @@ def batch_lookup(index: DeclarationIndex | None, store, article: str, descriptio
     Сначала артикул (в колонке может быть несколько значений через «; »; если описание — одно
     обозначение, то и оно: в таких строках артикул стоит вместо названия). Однозначного кода
     по артикулу нет — описание (near). {"result": {...}} — код из ДТ, модель не нужна;
-    {"checks": [...]} — в ДТ что-то есть, но код не однозначен: решает модель, человек видит ДТ.
+    {"checks": [...], "examples": [...]} — кода нет: решает модель, в промпт — ближайшие строки
+    ДТ примерами, человек в «Проверить» видит, что было в ДТ.
     С embedder ходит в сервер векторов — из async-кода только через to_thread.
     """
     if index is None:
@@ -262,7 +314,8 @@ def batch_lookup(index: DeclarationIndex | None, store, article: str, descriptio
     if near is not None:
         codes = ", ".join(near["codes"][:5])
         checks.append(f"Похожее описание в декларациях («{near['similar']}») оформлено кодами {codes}: сверить.")
-    return {"checks": checks} if checks else None
+    examples = [] if description_is_designation else index.examples(description, store, embedder)
+    return {"checks": checks, "examples": examples} if checks or examples else None
 
 
 def _result(found: dict, store) -> dict:

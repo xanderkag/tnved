@@ -54,6 +54,14 @@ EXAMPLES_DEFAULT = 5
 EXAMPLE_MIN_DEFAULT = 0.80
 MIN_DESCRIPTION_WORDS = 2
 _WORDS = re.compile(r"\w+")
+# «Части и принадлежности для <машины>» — описание класса, а не товара: деталь, которая сама
+# товар своей позиции, идёт в неё (прим. 2 к разделу XVI) — в 8532, 8533, 8541, а не в позицию
+# частей машины. В ДТ холдинга под одним таким описанием — 6 кодов; пока в своде был один,
+# код по описанию на новых ДТ был неверен у 91 товара из 203 совпавших, прочие — верны.
+# Такое описание кода не даёт (идёт в модель с примерами); длинное — уже называет деталь.
+_PARTS_ONLY = re.compile(r"^(?:запасные |составные )?(?:части|детали|комплектующие|принадлежности|запчасти)\b")
+PARTS_MAX_WORDS = 12
+PARTS_MISS = "описание называет только части"
 
 
 def norm_article(raw: object) -> str:
@@ -70,6 +78,11 @@ def norm_article(raw: object) -> str:
 
 def _digits(raw: object) -> str:
     return re.sub(r"\D", "", str(raw or ""))
+
+
+def parts_only(desc: str) -> bool:
+    """«Части / детали / комплектующие … для X» без названия самой детали (desc — norm_description)."""
+    return bool(_PARTS_ONLY.match(desc)) and len(_WORDS.findall(desc)) <= PARTS_MAX_WORDS
 
 
 def norm_description(raw: object) -> str:
@@ -181,6 +194,8 @@ class DeclarationIndex:
                         merged.refs[code].append(ref)
         found = _pick(merged, store)
         found.update(similar=hits[0][0], sim=round(hits[0][1], 3))
+        if "code" in found and parts_only(desc):
+            return {"miss": PARTS_MISS, "codes": [found["code"]], "similar": found["similar"], "sim": found["sim"]}
         return found
 
     def examples(self, description: object, store, embedder=None) -> list[dict]:
@@ -315,7 +330,10 @@ def batch_lookup(index: DeclarationIndex | None, store, article: str, descriptio
         result = _result(near, store)
         result["checks_required"][1:1] = checks
         return {"result": result}
-    if near is not None:
+    if near is not None and near["miss"] == PARTS_MISS:
+        checks.append(f"В декларациях описание «{near['similar']}» оформлено кодом {near['codes'][0]}, но оно называет "
+                      "только части: код — по самой детали (прим. 2 к разделу XVI), сверить.")
+    elif near is not None:
         codes = ", ".join(near["codes"][:5])
         checks.append(f"Похожее описание в декларациях («{near['similar']}») оформлено кодами {codes}: сверить.")
     examples = [] if description_is_designation else index.examples(description, store, embedder)

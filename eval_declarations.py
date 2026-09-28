@@ -96,7 +96,8 @@ def measure(train: list[dict], test: list[dict], store, embedder=None,
         desc = (r.get("description") or "").strip()
         dsg = designation_only(desc)
         got = declarations.batch_lookup(index, store, r.get("article") or "", desc, dsg, embedder)
-        row = {"dt_number": r.get("dt_number"), "article": r.get("article") or "", "description": desc,
+        row = {"dt_number": r.get("dt_number"), "item_no": r.get("item_no") or "",
+               "article": r.get("article") or "", "description": desc,
                "expected": expected, "designation": dsg, "path": "", "code": "",
                "checks": 0, "examples": 0}
         if got and "result" in got:
@@ -119,6 +120,22 @@ def measure(train: list[dict], test: list[dict], store, embedder=None,
             "coverage": len(subset) / n if n else 0.0,
             **{f"acc{k}": (sum(r["code"][:k] == r["expected"][:k] for r in subset) / len(subset) if subset else None)
                for k in (10, 6, 4)},
+        }
+    # По товарам: код у товара ДТ один, а строк у товара бывает десятки — по строкам большой товар
+    # весит, как десятки малых. Исход товара — первая его строка с кодом из ДТ, иначе «в модель».
+    items: dict[tuple, dict] = {}
+    for r in out_rows:
+        key = (r["dt_number"], r["item_no"]) if r["item_no"] else (r["dt_number"], id(r))
+        if key not in items or (r["code"] and not items[key]["code"]):
+            items[key] = r
+    it = list(items.values())
+    summary["items"] = {"items": len(it)}
+    for name, subset in [("всего", [r for r in it if r["code"]])] + [(p, [r for r in it if r["path"] == p]) for p in PATHS]:
+        summary["items"][name] = {
+            "items": len(subset),
+            "coverage": len(subset) / len(it) if it else 0.0,
+            **{f"acc{k}": (sum(r["code"][:k] == r["expected"][:k] for r in subset) / len(subset) if subset else None)
+               for k in (10, 4)},
         }
     to_model = [r for r in out_rows if not r["code"]]
     summary["to_model"] = {
@@ -157,6 +174,12 @@ def print_report(s: dict) -> None:
     for name, v in s["paths"].items():
         print(f"{PATH_NAMES.get(name, name):<20}{v['rows']:>7}{pct(v['coverage']):>10}"
               f"{pct(v['acc10']):>9}{pct(v['acc6']):>9}{pct(v['acc4']):>9}")
+    i = s["items"]
+    print(f"По товарам (ДТ + номер товара), всего {i['items']}:")
+    for name in ("всего",) + PATHS:
+        v = i[name]
+        print(f"  {PATH_NAMES.get(name, name):<18}{v['items']:>7}{pct(v['coverage']):>10}"
+              f"{pct(v['acc10']):>9}{'':>9}{pct(v['acc4']):>9}")
     m = s["to_model"]
     print(f"В модель: {m['rows']} (с проверкой по ДТ {m['with_checks']}, с примерами {m['with_examples']}, "
           f"только обозначение {m['designation_only']}); артикул с другим кодом, чем в прошлых ДТ: "

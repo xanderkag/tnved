@@ -38,3 +38,6 @@ static/demo_input.xlsx
 Thumbs.db
 .idea/
 .vscode/
+
+# сырые данные от SLAI (выгрузка ДТ) — не в образ; в сервис идёт только собранная из них таблица
+incoming/

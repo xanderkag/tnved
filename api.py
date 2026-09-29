@@ -37,6 +37,7 @@ from classifier import (
     triage,
 )
 import declarations
+import precedents
 from embedder import EmbeddingsUnavailable
 from tnved_data import TNVEDStore
 
@@ -68,6 +69,7 @@ class App:
     llm: LLMConfig | None = None
     store: TNVEDStore | None = None
     decl: declarations.DeclarationIndex | None = None  # уровень 1 — ДТ; None — выключен
+    prec: precedents.PrecedentIndex | None = None  # позиции похожих товаров из реестров ФСА; None — выключен
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
     chats: dict[str, dict] = {}
@@ -112,6 +114,8 @@ async def lifespan(app: FastAPI):
     print(f"Модель: {state.llm.model} @ {state.llm.base_url}")
     # DECLARATIONS_PATH задан, а файл не читается — тоже не стартуем (исключение наружу).
     state.decl = declarations.load_from_env()
+    # PRECEDENTS_PATH — так же: задан и не читается — не стартуем.
+    state.prec = precedents.load_from_env()
     print("Загружаем ресурсы ТН ВЭД...")
     try:
         state.store = TNVEDStore()
@@ -221,6 +225,13 @@ def _declaration_triage(found: dict) -> dict:
             "completeness": "high", "missing_aspects": [], "questions": []}
 
 
+def _precedents(text: str) -> list[tuple[str, float]] | None:
+    """Позиции похожих товаров из реестров ФСА — подсказка triage; уровень выключен — None."""
+    if state.prec is None or state.store is None or not text:
+        return None
+    return state.prec.headings(text, valid=state.store.current_headings)
+
+
 def _decl_examples(decl: dict | None) -> list[dict] | None:
     """Ближайшие строки ДТ — в triage и classify, когда кода из ДТ нет."""
     return decl.get("examples") if decl else None
@@ -264,7 +275,8 @@ async def classify_start(
     if decl and "result" in decl:
         triage_result = _declaration_triage(decl["result"])
     else:
-        triage_result = await triage(store, description, cfg, examples=_decl_examples(decl))
+        triage_result = await triage(store, description, cfg, examples=_decl_examples(decl),
+                                     precedents=_precedents(description))
 
     session_id = uuid.uuid4().hex[:12]
     state.sessions[session_id] = {
@@ -312,7 +324,8 @@ async def classify_finalize(
             # Группа и позиции — заново по описанию с ответами, как в чате: описание, по которому
             # спрашивали, обычно слишком короткое («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
             # Вопросы второго triage не задаются.
-            triage_res = await triage(store, description, cfg, examples=_decl_examples(decl))
+            triage_res = await triage(store, description, cfg, examples=_decl_examples(decl),
+                                     precedents=_precedents(description))
             session["triage_final"] = triage_res
         result = await _classify_with_declarations(store, description, triage_res, cfg, decl)
 
@@ -361,6 +374,7 @@ async def health():
             "descriptions": len(state.decl.desc_keys),
             "description_vectors": 0 if state.decl.desc_vecs is None else len(state.decl.desc_vecs),
         },
+        "precedents": None if state.prec is None else {"names": len(state.prec.names)},
     }
 
 
@@ -539,7 +553,8 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
             result = _declaration_result(decl["result"])
             chat["triage"] = _declaration_triage(decl["result"])
             return _chat_finalize(chat, chat["description"], chat["triage"], result)
-        triage_res = await triage(store, chat["description"], cfg, examples=_decl_examples(decl))
+        triage_res = await triage(store, chat["description"], cfg, examples=_decl_examples(decl),
+                                 precedents=_precedents(chat["description"]))
         chat["triage"] = triage_res
         if triage_res.get("completeness", "low") != "high" and triage_res.get("questions"):
             chat["messages"].append({
@@ -555,7 +570,8 @@ async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
         # Группа и позиции — заново по описанию с ответом: первая реплика, по которой спрашивали,
         # обычно слишком короткая («лоток» → группа 39, код 7323; с ответом — 84, 8473 30 80).
         # Вопросы второго triage не задаются.
-        triage_res = await triage(store, description, cfg, examples=_decl_examples(decl))
+        triage_res = await triage(store, description, cfg, examples=_decl_examples(decl),
+                                     precedents=_precedents(description))
         chat["triage_final"] = triage_res
 
     result = await _classify_with_declarations(store, description, triage_res, cfg, decl)
@@ -768,7 +784,8 @@ def _read_batch_items(rows: list[tuple]) -> tuple[list[dict], dict]:
 async def _classify_one_for_batch(description: str, cfg: LLMConfig, examples: list[dict] | None = None) -> dict:
     """В батче пропускаем уточнения: триаж → классификация на исходном описании (обоим — примеры из ДТ)."""
     store = _require_store()
-    triage_result = await triage(store, description, cfg, examples=examples)
+    triage_result = await triage(store, description, cfg, examples=examples,
+                                 precedents=_precedents(description))
     result = await classify(store, description, triage_result.get("group_code", ""), cfg=cfg,
                             headings=triage_result.get("headings"), examples=examples)
     return {

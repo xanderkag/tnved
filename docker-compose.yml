@@ -40,6 +40,10 @@ services:
       DECLARATIONS_NEAR_MIN: ${DECLARATIONS_NEAR_MIN:-}
       DECLARATIONS_EXAMPLES: ${DECLARATIONS_EXAMPLES:-}
       DECLARATIONS_EXAMPLE_MIN: ${DECLARATIONS_EXAMPLE_MIN:-}
+      # Прецеденты ФСА — позиции похожих товаров из реестров деклараций и сертификатов
+      # соответствия, подсказка triage. Свод — тоже в ./incoming; не задан — выключено.
+      PRECEDENTS_PATH: ${PRECEDENTS_PATH:-}
+      PRECEDENTS_NEIGHBOURS: ${PRECEDENTS_NEIGHBOURS:-}
     volumes:
       - ./incoming:/app/incoming:ro
     healthcheck:

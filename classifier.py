@@ -450,16 +450,37 @@ def _heading_candidates(found: list[dict]) -> list[dict]:
     return [c for c in found if c["code"] in chosen]
 
 
+def _precedents_for_prompt(store: TNVEDStore, precedents: list[tuple[str, float]] | None) -> str:
+    """Позиции, которые заявляли у похожих товаров в реестрах ФСА, — подсказка, а не ответ."""
+    if not precedents:
+        return ""
+    lines = []
+    for heading, share in precedents[:PRECEDENT_HEADINGS]:
+        info = store.group_info(heading)
+        name = _cut_level(info["description"], PRECEDENT_NAME_LIMIT) if info else ""
+        lines.append(f"  - {heading} {name} — {share:.0%} голосов")
+    return (
+        "ПОЗИЦИИ, КОТОРЫЕ ЗАЯВЛЯЛИ У ПОХОЖИХ ТОВАРОВ (декларации и сертификаты соответствия, "
+        "открытые данные ФСА; код ставит заявитель, таможня его не проверяла):\n"
+        + "\n".join(lines) + "\n"
+        "Это подсказка: у похожих по названию товаров позиция может быть другой. "
+        "Подходит по сути (назначение, устройство, материал) — учти её, не подходит — выбирай по описанию.\n\n"
+    )
+
+
 async def triage(
     store: TNVEDStore,
     description: str,
     cfg: LLMConfig,
     examples: list[dict] | None = None,
+    precedents: list[tuple[str, float]] | None = None,
 ) -> dict:
-    """Определяет группу и набор уточняющих вопросов; examples — ближайшие строки ДТ холдинга."""
+    """Определяет группу и набор уточняющих вопросов; examples — ближайшие строки ДТ холдинга,
+    precedents — позиции похожих товаров из реестров ФСА (precedents.PrecedentIndex.headings)."""
     user = (
         f"ОПИСАНИЕ ТОВАРА:\n{description}\n\n"
         f"{_examples_for_prompt(examples, EXAMPLES_TRIAGE)}"
+        f"{_precedents_for_prompt(store, precedents)}"
         f"ДОСТУПНЫЕ ГРУППЫ ТН ВЭД:\n{store.groups_list_for_prompt()}"
     )
     result = await llm_json(cfg, TRIAGE_SYSTEM, user)
@@ -725,6 +746,9 @@ def _subheading_rivals(store: TNVEDStore, result: dict) -> None:
 
 
 EXAMPLE_LIMIT = 200
+# Прецеденты ФСА в triage: сколько позиций показываем и длина их названия.
+PRECEDENT_HEADINGS = 3
+PRECEDENT_NAME_LIMIT = 120
 
 
 EXAMPLES_CLASSIFY = (

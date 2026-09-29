@@ -1,0 +1,59 @@
+# Инстанс asha (D-9): свой bge-m3 рядом с сервисом, LLM — шлюз Ванги на этом же хосте.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.asha.yml up -d --build
+#
+# .env на asha: LLM_BASE_URL — адрес шлюза, VANGA_HOST — его имя хоста, LLM_MODEL — алиас
+# (всё — из треда Q-TN-VED-DOSTUP-1), LLM_REASONING_EFFORT=none, HOST_PORT=127.0.0.1:8110
+# (наружу — только через прокси). Ключ шлюза — файлом VANGA_KEY_FILE на хосте, значение
+# в .env не пишем.
+#
+# Модель в томе tnved-ollama (external): до первого запуска
+#   docker volume create tnved-ollama
+#   docker run --rm -v tnved-ollama:/root/.ollama ollama/ollama sh -c "ollama serve & sleep 3; ollama pull bge-m3"
+# Индекс в data/ собран этой же моделью (паспорт data/tnved_index_info.json: api:bge-m3).
+
+services:
+  app:
+    environment:
+      EMBEDDER_BACKEND: api
+      EMBEDDINGS_BASE_URL: http://embed:11434/v1
+      EMBEDDINGS_MODEL: bge-m3
+      LLM_API_KEY_FILE: /run/secrets/llm_key
+    secrets:
+      - llm_key
+    # Шлюз — на этом же хосте за его nginx. Имя шлюза резолвим в адрес хоста в сети
+    # docker: запрос идёт тем же путём (nginx, TLS, ключ, квота), но адрес внутренний —
+    # проверку netcheck проходит, описания товаров хост не покидают.
+    extra_hosts:
+      - "${VANGA_HOST:?задайте VANGA_HOST — имя хоста шлюза из LLM_BASE_URL}:host-gateway"
+    depends_on:
+      embed:
+        condition: service_healthy
+
+  embed:
+    image: ollama/ollama:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-tnved}-embed
+    restart: unless-stopped
+    # Портов наружу нет: векторы нужны только app, по сети compose.
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"          # модель ~1,2 ГБ держим в памяти, без холодного старта
+      OLLAMA_NUM_PARALLEL: "2"
+    volumes:
+      - tnved-ollama:/root/.ollama
+    # asha — прод: bge-m3 не должна отнимать CPU у соседей. Запрос — ~0,13 с.
+    cpus: 2
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "ollama", "show", "bge-m3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+secrets:
+  llm_key:
+    file: ${VANGA_KEY_FILE:?задайте VANGA_KEY_FILE — путь к файлу ключа шлюза на хосте}
+
+volumes:
+  tnved-ollama:
+    external: true

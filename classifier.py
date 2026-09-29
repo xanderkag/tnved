@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel
@@ -34,6 +35,9 @@ class LLMConfig(BaseModel):
     base_url: str
     model: str
     api_key: str = ""
+    # Шлюз Ванги (asha) выключает рассуждения только так: chat_template_kwargs он
+    # не передаёт дальше. Пусто — поле в запрос не кладём (vLLM в контуре).
+    reasoning_effort: str = ""
 
 
 # По этим переменным раньше ходили в OpenAI / Anthropic. Если они заданы,
@@ -60,8 +64,29 @@ def llm_config_from_env() -> LLMConfig:
     return LLMConfig(
         base_url=require_internal_url(base_url, "LLM_BASE_URL"),
         model=model,
-        api_key=os.environ.get("LLM_API_KEY", "").strip(),
+        api_key=_api_key_from_env(),
+        reasoning_effort=os.environ.get("LLM_REASONING_EFFORT", "").strip(),
     )
+
+
+def _api_key_from_env() -> str:
+    """Ключ — из LLM_API_KEY или из файла LLM_API_KEY_FILE (подключённый секрет).
+
+    Оба сразу — отказ: непонятно, какой из них имели в виду.
+    """
+    key = os.environ.get("LLM_API_KEY", "").strip()
+    path = os.environ.get("LLM_API_KEY_FILE", "").strip()
+    if key and path:
+        raise RuntimeError("Заданы и LLM_API_KEY, и LLM_API_KEY_FILE — оставьте одно.")
+    if not path:
+        return key
+    try:
+        key = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"LLM_API_KEY_FILE={path}: файл не читается ({exc.strerror})") from exc
+    if not key:
+        raise RuntimeError(f"LLM_API_KEY_FILE={path}: файл пуст")
+    return key
 
 
 class LLMUnavailable(RuntimeError):
@@ -147,7 +172,8 @@ async def _llm_call(client, cfg: LLMConfig, system: str, user: str, schema: dict
             # Qwen3.x — без «размышлений», ответ сразу JSON. Иначе при reasoning-парсере
             # на сервере модель думает до JSON тысячи токенов и не укладывается в таймаут.
             # Шаблоны других моделей лишний ключ игнорируют.
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body={"chat_template_kwargs": {"enable_thinking": False},
+                        **({"reasoning_effort": cfg.reasoning_effort} if cfg.reasoning_effort else {})},
         )
     except APIError as exc:
         raise LLMUnavailable(f"Модель {cfg.model} не ответила: {exc}") from exc

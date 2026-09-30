@@ -12,6 +12,7 @@ import hashlib
 import io
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -38,6 +39,7 @@ from classifier import (
 )
 import declarations
 import precedents
+import state_store
 from embedder import EmbeddingsUnavailable
 from tnved_data import TNVEDStore
 
@@ -48,6 +50,9 @@ BATCH_MAX_ROWS = int(os.environ.get("BATCH_MAX_ROWS", "500"))
 MAX_DESCRIPTION_LEN = int(os.environ.get("MAX_DESCRIPTION_LEN", "5000"))
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_HOURS", "24")) * 3600
 CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "600"))
+# Пакетов одновременно (B6): модель общая с parsdocs, второй пакет ждёт в очереди (status queued).
+BATCH_MAX_RUNNING = int(os.environ.get("BATCH_MAX_RUNNING", "1"))
+BATCH_SAVE_SECONDS = 5  # прогресс пакета на диск — не чаще; после перезапуска повторяются только несохранённые строки
 
 
 def _compute_static_version() -> str:
@@ -70,12 +75,42 @@ class App:
     store: TNVEDStore | None = None
     decl: declarations.DeclarationIndex | None = None  # уровень 1 — ДТ; None — выключен
     prec: precedents.PrecedentIndex | None = None  # позиции похожих товаров из реестров ФСА; None — выключен
+    persist: state_store.StateStore | None = None  # STATE_DB_PATH; None — только в памяти
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
     chats: dict[str, dict] = {}
 
 
 state = App()
+_batch_slots: asyncio.Semaphore | None = None  # BATCH_MAX_RUNNING, создаётся в lifespan — в цикле сервиса
+_batch_tasks: set[asyncio.Task] = set()  # ссылки на задачи пакетов, иначе сборщик мусора может их снять
+
+
+def _start_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
+    task = asyncio.create_task(_run_batch(job_id, items, cfg))
+    _batch_tasks.add(task)
+    task.add_done_callback(_batch_tasks.discard)
+
+
+def _persist(kind: str, obj: dict) -> None:
+    """Сохранить объект на диск. Не вышло — ответ пользователю не ломаем, причина в логе."""
+    if state.persist is None:
+        return
+    try:
+        state.persist.save(kind, obj)
+    except Exception as e:  # noqa: BLE001
+        print(f"[state] {kind}/{obj.get('id')} не сохранён: {e}")
+
+
+def _forget(kind: str, ids: list[str]) -> None:
+    store = getattr(state, kind)
+    for k in ids:
+        store.pop(k, None)
+    if state.persist is not None:
+        try:
+            state.persist.delete(kind, ids)
+        except Exception as e:  # noqa: BLE001
+            print(f"[state] {kind}: не удалены с диска: {e}")
 
 
 async def _cleanup_loop() -> None:
@@ -85,22 +120,14 @@ async def _cleanup_loop() -> None:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
             cutoff_iso = (datetime.utcnow() - timedelta(seconds=SESSION_TTL_SECONDS)).isoformat()
 
-            stale = [k for k, v in state.sessions.items() if (v.get("created_at") or "") < cutoff_iso]
-            for k in stale:
-                state.sessions.pop(k, None)
-
-            # batch — чистим только завершённые, бегущие не трогаем
-            stale = [
+            _forget("sessions", [k for k, v in state.sessions.items() if (v.get("created_at") or "") < cutoff_iso])
+            # batch — чистим только завершённые, бегущие и ждущие не трогаем
+            _forget("batch_jobs", [
                 k for k, v in state.batch_jobs.items()
                 if v.get("status") in ("done", "failed")
                 and (v.get("finished_at") or v.get("started_at") or "") < cutoff_iso
-            ]
-            for k in stale:
-                state.batch_jobs.pop(k, None)
-
-            stale = [k for k, v in state.chats.items() if (v.get("created_at") or "") < cutoff_iso]
-            for k in stale:
-                state.chats.pop(k, None)
+            ])
+            _forget("chats", [k for k, v in state.chats.items() if (v.get("created_at") or "") < cutoff_iso])
         except asyncio.CancelledError:
             return
         except Exception as e:  # noqa: BLE001 — фоновый цикл не должен умирать
@@ -116,6 +143,15 @@ async def lifespan(app: FastAPI):
     state.decl = declarations.load_from_env()
     # PRECEDENTS_PATH — так же: задан и не читается — не стартуем.
     state.prec = precedents.load_from_env()
+    # STATE_DB_PATH — так же: задан и не открывается — не стартуем; не задан — только в памяти.
+    state.persist = state_store.load_from_env()
+    if state.persist is not None:
+        for kind in state_store.KINDS:
+            setattr(state, kind, state.persist.load(kind))
+        print(f"[state] {state.persist.path}: сессий {len(state.sessions)}, чатов {len(state.chats)}, "
+              f"пакетов {len(state.batch_jobs)}")
+    else:
+        print("[state] STATE_DB_PATH не задан — сессии, чаты и пакеты только в памяти, перезапуск их теряет")
     print("Загружаем ресурсы ТН ВЭД...")
     try:
         state.store = TNVEDStore()
@@ -132,6 +168,17 @@ async def lifespan(app: FastAPI):
         except EmbeddingsUnavailable as e:
             print(f"[decl] векторы описаний не построены, по описанию только дословно: {e}")
 
+    global _batch_slots
+    _batch_slots = asyncio.Semaphore(BATCH_MAX_RUNNING)
+    # Пакеты, прерванные перезапуском, — дальше с первой необработанной строки, в прежнем порядке.
+    unfinished = sorted((j for j in state.batch_jobs.values() if j.get("status") in ("queued", "running")),
+                        key=lambda j: j.get("started_at") or "")
+    if unfinished and state.store is not None:
+        print(f"[state] продолжаем пакетов: {len(unfinished)}")
+        for job in unfinished:
+            job["status"] = "queued"
+            _start_batch(job["id"], job["items"], state.llm)
+
     cleanup_task = asyncio.create_task(_cleanup_loop())
     try:
         yield
@@ -141,6 +188,13 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+        if state.persist is not None:
+            # прогресс бегущих пакетов — на диск, чтобы после запуска не повторять сделанное
+            for job in state.batch_jobs.values():
+                if job.get("status") in ("queued", "running"):
+                    _persist("batch_jobs", job)
+            state.persist.close()
+            state.persist = None
 
 
 app = FastAPI(lifespan=lifespan, title="ТН ВЭД Ассистент")
@@ -288,6 +342,7 @@ async def classify_start(
         "triage": triage_result,
         "decl": decl,
     }
+    _persist("sessions", state.sessions[session_id])
 
     return {
         "session_id": session_id,
@@ -333,6 +388,7 @@ async def classify_finalize(
     session["full_description"] = description
     session["result"] = result
     session["finalized_at"] = datetime.utcnow().isoformat()
+    _persist("sessions", session)
 
     return {
         "session_id": req.session_id,
@@ -375,6 +431,8 @@ async def health():
             "description_vectors": 0 if state.decl.desc_vecs is None else len(state.decl.desc_vecs),
         },
         "precedents": None if state.prec is None else {"names": len(state.prec.names)},
+        "state": "sqlite" if state.persist is not None else "memory",
+        "batch": {s: sum(j.get("status") == s for j in state.batch_jobs.values()) for s in ("running", "queued")},
     }
 
 
@@ -534,6 +592,14 @@ def _chat_format_questions(triage_res: dict) -> str:
 
 
 async def _chat_handle_user(chat_id: str, text: str, cfg: LLMConfig) -> dict:
+    """Ход пользователя; чат сохраняется и тогда, когда модель не ответила — реплика в нём остаётся."""
+    try:
+        return await _chat_turn(chat_id, text, cfg)
+    finally:
+        _persist("chats", state.chats[chat_id])
+
+
+async def _chat_turn(chat_id: str, text: str, cfg: LLMConfig) -> dict:
     """Ход пользователя в чате: один раунд вопросов. Первая реплика — triage; не хватает
     деталей — вопросы. Вторая реплика — ответ: triage по описанию с ответом (группа и позиции,
     без новых вопросов) и classify. Не больше двух triage и одного classify на чат
@@ -623,6 +689,7 @@ async def chat_start(
         "role": "assistant",
         "content": "Опишите товар — состав, назначение, форму, технические параметры. Я задам уточняющие вопросы и подберу код ТН ВЭД.",
     })
+    _persist("chats", state.chats[chat_id])
     return {
         "chat_id": chat_id,
         "phase": "gathering",
@@ -798,8 +865,19 @@ async def _classify_one_for_batch(description: str, cfg: LLMConfig, examples: li
 
 
 async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
+    """Пакет ждёт свободного места (BATCH_MAX_RUNNING, до того — status queued). Строки с готовым
+    результатом пропускаются — так пакет продолжается после перезапуска. Прогресс — на диск,
+    не чаще BATCH_SAVE_SECONDS."""
     job = state.batch_jobs[job_id]
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
+    last_save = 0.0
+
+    def progress() -> None:
+        nonlocal last_save
+        job["processed"] += 1
+        if time.monotonic() - last_save >= BATCH_SAVE_SECONDS:
+            last_save = time.monotonic()
+            _persist("batch_jobs", job)
 
     async def worker(idx: int, item: dict) -> None:
         # Уровень 1: артикул или описание есть в декларациях с одним действующим кодом — код оттуда, без модели.
@@ -810,12 +888,12 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
                 designation_only(item["description"]), state.store.embedder)
         if decl and "result" in decl:
             job["results"][idx] = decl["result"]
-            job["processed"] += 1
+            progress()
             return
         if item.get("error"):  # строка без описания или слишком длинная — к модели не идёт
             job["results"][idx] = {"error": item["error"]}
             job["errors"].append({"row": item["row"], "error": item["error"]})
-            job["processed"] += 1
+            progress()
             return
         async with sem:
             try:
@@ -830,16 +908,23 @@ async def _run_batch(job_id: str, items: list[dict], cfg: LLMConfig) -> None:
                 job["results"][idx] = {"error": str(e)}
                 job["errors"].append({"row": item["row"], "error": str(e)})
             finally:
-                job["processed"] += 1
+                progress()
 
-    try:
-        await asyncio.gather(*(worker(i, item) for i, item in enumerate(items)))
-        job["status"] = "done"
-    except Exception as e:
-        job["status"] = "failed"
-        job["errors"].append({"row": 0, "error": f"job-level: {e}"})
-    finally:
+    async with _batch_slots:
+        job["status"] = "running"
+        job["processed"] = sum(r is not None for r in job["results"])
+        _persist("batch_jobs", job)
+        try:
+            await asyncio.gather(*(worker(i, item) for i, item in enumerate(items) if job["results"][i] is None))
+            job["status"] = "done"
+        except asyncio.CancelledError:  # сервер останавливается — пакет продолжится после запуска
+            _persist("batch_jobs", job)
+            raise
+        except Exception as e:
+            job["status"] = "failed"
+            job["errors"].append({"row": 0, "error": f"job-level: {e}"})
         job["finished_at"] = datetime.utcnow().isoformat()
+        _persist("batch_jobs", job)
 
 
 @app.post("/api/classify/batch")
@@ -872,12 +957,14 @@ async def classify_batch_start(
         raise HTTPException(400, f"Слишком много строк: {len(items)} > лимит {BATCH_MAX_ROWS}")
 
     job_id = uuid.uuid4().hex[:12]
+    ahead = sum(j.get("status") in ("queued", "running") for j in state.batch_jobs.values())
+    status = "queued" if ahead >= BATCH_MAX_RUNNING else "running"
     state.batch_jobs[job_id] = {
         "id": job_id,
         "filename": file.filename,
         "total": len(items),
         "processed": 0,
-        "status": "running",
+        "status": status,
         "started_at": datetime.utcnow().isoformat(),
         "finished_at": None,
         "llm_model": cfg.model,
@@ -887,9 +974,10 @@ async def classify_batch_start(
         "errors": [],
     }
 
-    asyncio.create_task(_run_batch(job_id, items, cfg))
+    _persist("batch_jobs", state.batch_jobs[job_id])
+    _start_batch(job_id, items, cfg)
 
-    return {"job_id": job_id, "total": len(items), "status": "running", "columns": columns}
+    return {"job_id": job_id, "total": len(items), "status": status, "columns": columns}
 
 
 @app.get("/api/classify/batch/{job_id}")

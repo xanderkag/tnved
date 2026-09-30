@@ -46,8 +46,16 @@ services:
       # соответствия, подсказка triage. Свод — тоже в ./incoming; не задан — выключено.
       PRECEDENTS_PATH: ${PRECEDENTS_PATH:-}
       PRECEDENTS_NEIGHBOURS: ${PRECEDENTS_NEIGHBOURS:-}
+      # Сессии, чаты и пакеты — на диске хоста (./state), перезапуск и выкат их не теряют;
+      # незаконченный пакет продолжается с места обрыва. Пусто — только в памяти.
+      STATE_DB_PATH: ${STATE_DB_PATH-/app/state/state.db}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-24}
+      # Модель общая: вызовов одновременно на весь сервис и пакетов одновременно (остальные — в очереди).
+      LLM_MAX_CONCURRENCY: ${LLM_MAX_CONCURRENCY:-8}
+      BATCH_MAX_RUNNING: ${BATCH_MAX_RUNNING:-1}
     volumes:
       - ./incoming:/app/incoming:ro
+      - ./state:/app/state
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s

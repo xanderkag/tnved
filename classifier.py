@@ -106,6 +106,18 @@ LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
 # пилот c06d29f — 2048 токенов за 42 с, повтор того же запроса — 654. Потолок со схемой ниже,
 # обрыв — один повтор.
 LLM_SCHEMA_MAX_TOKENS = int(os.environ.get("LLM_SCHEMA_MAX_TOKENS", "1400"))
+# Вызовов модели одновременно на весь сервис (B6): модель общая с parsdocs. Лишние ждут очереди;
+# ожидание в LLM_TIMEOUT не входит — он считается от отправки запроса.
+LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "8"))
+_llm_slots: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+def _llm_slot() -> asyncio.Semaphore:
+    """Семафор своего цикла событий: у сервиса цикл один, у скриптов замера — свой на каждый asyncio.run."""
+    loop = asyncio.get_running_loop()
+    if loop not in _llm_slots:
+        _llm_slots[loop] = asyncio.Semaphore(LLM_MAX_CONCURRENCY)
+    return _llm_slots[loop]
 
 
 def _parse_json_loose(raw: str) -> dict:
@@ -157,6 +169,11 @@ async def llm_json(cfg: LLMConfig, system: str, user: str, schema: dict | None =
 
 
 async def _llm_call(client, cfg: LLMConfig, system: str, user: str, schema: dict | None, max_tokens: int):
+    async with _llm_slot():
+        return await _llm_call_now(client, cfg, system, user, schema, max_tokens)
+
+
+async def _llm_call_now(client, cfg: LLMConfig, system: str, user: str, schema: dict | None, max_tokens: int):
     t0 = time.perf_counter()
     try:
         resp = await client.chat.completions.create(

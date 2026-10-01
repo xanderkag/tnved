@@ -25,6 +25,11 @@ DECLARATIONS_NEAR_MIN (по умолчанию 0.93, уточнить замер
 Третий ход — код не выбран: ближайшие описания ДТ (выше DECLARATIONS_EXAMPLE_MIN, до
 DECLARATIONS_EXAMPLES штук) с действующими кодами уходят модели примерами, а их коды — в
 кандидаты: модель видит, как похожие товары уже оформляли, но решает сама.
+
+Описание на другом языке (инвойс по-английски, ДТ по-русски): bge-m3 сопоставляет языки с
+заниженным сходством — у верных пар 0,5–0,8 вместо 0,8–1,0, порог 0,80 не проходит почти никто
+(замер 30.09: примеры у 12 % товаров). Для описаний без кириллицы порог примеров —
+DECLARATIONS_EXAMPLE_MIN_FOREIGN (0.60). Код из ДТ (near) от языка не зависит: порог 0.93 тот же.
 """
 from __future__ import annotations
 
@@ -54,6 +59,9 @@ NEAR_MIN_DEFAULT = 0.93
 NEAR_TOP_K = 5
 EXAMPLES_DEFAULT = 5
 EXAMPLE_MIN_DEFAULT = 0.80
+EXAMPLE_MIN_FOREIGN_DEFAULT = 0.60
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+_LATIN = re.compile(r"[A-Za-z]")
 MIN_DESCRIPTION_WORDS = 2
 _WORDS = re.compile(r"\w+")
 # «Части и принадлежности для <машины>» — описание класса, а не товара: деталь, которая сама
@@ -104,6 +112,12 @@ def _threshold_from_env(name: str, default: float) -> float:
     return value
 
 
+def is_foreign(text: object) -> bool:
+    """Описание не на языке ДТ: есть латиница и нет кириллицы (обозначения вроде «РС-7 М» — не повод)."""
+    s = str(text or "")
+    return bool(_LATIN.search(s)) and not _CYRILLIC.search(s)
+
+
 def near_min_from_env() -> float:
     return _threshold_from_env("DECLARATIONS_NEAR_MIN", NEAR_MIN_DEFAULT)
 
@@ -115,7 +129,8 @@ def settings_from_env() -> dict:
     if not 0 <= examples_k <= 20:
         raise ValueError(f"DECLARATIONS_EXAMPLES={raw}: нужно целое от 0 до 20")
     return {"near_min": near_min_from_env(), "examples_k": examples_k,
-            "example_min": _threshold_from_env("DECLARATIONS_EXAMPLE_MIN", EXAMPLE_MIN_DEFAULT)}
+            "example_min": _threshold_from_env("DECLARATIONS_EXAMPLE_MIN", EXAMPLE_MIN_DEFAULT),
+            "example_min_foreign": _threshold_from_env("DECLARATIONS_EXAMPLE_MIN_FOREIGN", EXAMPLE_MIN_FOREIGN_DEFAULT)}
 
 
 @dataclass
@@ -129,7 +144,7 @@ class DeclarationIndex:
 
     def __init__(self, rows: list[dict], near_min: float = NEAR_MIN_DEFAULT,
                  examples_k: int = EXAMPLES_DEFAULT, example_min: float = EXAMPLE_MIN_DEFAULT,
-                 markings: bool = True):
+                 markings: bool = True, example_min_foreign: float = EXAMPLE_MIN_FOREIGN_DEFAULT):
         self.by_article: dict[str, _Article] = defaultdict(_Article)
         self.by_description: dict[str, _Article] = defaultdict(_Article)
         self.rows = 0
@@ -137,6 +152,7 @@ class DeclarationIndex:
         self.near_min = near_min
         self.examples_k = examples_k
         self.example_min = example_min
+        self.example_min_foreign = example_min_foreign
         self._last_query: tuple[str, np.ndarray] | None = None  # near и examples по одной строке — один запрос
         self.desc_keys: list[str] = []
         self.desc_vecs: np.ndarray | None = None  # build_vectors; None — по описанию только дословно
@@ -206,13 +222,15 @@ class DeclarationIndex:
         """Ближайшие описания ДТ с действующими кодами — примеры для модели.
 
         [{"description", "code", "rows", "sim"}]: такое же описание первым, дальше по сходству
-        не ниже example_min; не больше examples_k. Снятые коды не показываем: их выбирать нельзя.
+        не ниже example_min (для описания без кириллицы — example_min_foreign); не больше examples_k.
+        Снятые коды не показываем: их выбирать нельзя.
         """
         desc = norm_description(description)
         if not desc or not self.examples_k:
             return []
         hits = [(desc, 1.0)] if desc in self.by_description else []
-        hits += [h for h in self._similar(desc, embedder, self.example_min, self.examples_k + 1) if h[0] != desc]
+        floor = self.example_min_foreign if is_foreign(description) else self.example_min
+        hits += [h for h in self._similar(desc, embedder, floor, self.examples_k + 1) if h[0] != desc]
         out = []
         for key, sim in hits:
             for code, n in self.by_description[key].codes.most_common():

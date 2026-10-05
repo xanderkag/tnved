@@ -6,6 +6,11 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Секреты инстанса — только на хосте, в git никогда
+.env
+.env.*
+!.env.example
+
 # Virtual environment
 venv/
 .venv/

@@ -24,6 +24,12 @@ services:
       DECISIONS_MODEL: ${DECISIONS_MODEL:-}
       NAV_THRESHOLD: ${NAV_THRESHOLD:-0.8}
       NAV_CANDIDATES: ${NAV_CANDIDATES:-8}
+      # Лимиты открытой страницы (nav_limits.py); 0 — выключены.
+      NAV_FREE_PER_DAY: ${NAV_FREE_PER_DAY:-0}
+      NAV_EMAIL_PER_DAY: ${NAV_EMAIL_PER_DAY:-10}
+      NAV_DAILY_CAP: ${NAV_DAILY_CAP:-0}
+      NAV_SITE_TOKEN: ${NAV_SITE_TOKEN:-}
+      NAV_TRUST_PROXY: ${NAV_TRUST_PROXY:-0}
     secrets:
       - llm_key
     # Шлюз — на этом же хосте за его nginx. Имя шлюза резолвим в адрес хоста в сети

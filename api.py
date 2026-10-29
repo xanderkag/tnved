@@ -39,6 +39,7 @@ from classifier import (
 )
 import declarations
 import decisions
+import nav_limits
 import navigator
 import precedents
 import state_store
@@ -86,6 +87,7 @@ class App:
 
 
 state = App()
+limits = nav_limits.Limits()
 _batch_slots: asyncio.Semaphore | None = None  # BATCH_MAX_RUNNING, создаётся в lifespan — в цикле сервиса
 _batch_tasks: set[asyncio.Task] = set()  # ссылки на задачи пакетов, иначе сборщик мусора может их снять
 
@@ -230,14 +232,22 @@ async def llm_unavailable(request: Request, exc: LLMUnavailable):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+def _until_utc_midnight() -> dict[str, str]:
+    """Retry-After до 00:00 UTC: тогда обнуляются и бюджет шлюза, и лимиты навигатора."""
+    now = datetime.utcnow()
+    reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return {"Retry-After": str(int((reset - now).total_seconds()))}
+
+
 @app.exception_handler(decisions.DecisionsUnavailable)
 async def decisions_unavailable(request: Request, exc: decisions.DecisionsUnavailable):
-    headers = None
-    if exc.quota:  # бюджет шлюза обнуляется в 00:00 UTC
-        now = datetime.utcnow()
-        reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        headers = {"Retry-After": str(int((reset - now).total_seconds()))}
+    headers = _until_utc_midnight() if exc.quota else None
     return JSONResponse(status_code=503, content={"detail": str(exc)}, headers=headers)
+
+
+@app.exception_handler(nav_limits.LimitExceeded)
+async def limit_exceeded(request: Request, exc: nav_limits.LimitExceeded):
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc)}, headers=_until_utc_midnight())
 
 
 @app.exception_handler(EmbeddingsUnavailable)
@@ -426,12 +436,13 @@ class NavigateRequest(BaseModel):
 
 
 @app.post("/api/navigate")
-async def navigate(req: NavigateRequest):
+async def navigate(req: NavigateRequest, request: Request):
     """Навигатор (ALG-3): код спускается по дереву, канал решений выбирает ветку.
 
     Без сессии: клиент держит описание и шлёт path выбранного варианта вопроса. Ответ —
     код на столько знаков, сколько известно (digits), путь, шаги с вероятностями и
-    question, если дальше без человека не пройти; done — дошли до 10-значного кода."""
+    question, если дальше без человека не пройти; done — дошли до 10-значного кода.
+    Лимиты (nav_limits) считают новые товары — запросы без path."""
     store = _require_store()
     if state.tree is None or state.dec is None:
         raise HTTPException(503, "Навигатор выключен: канал решений не настроен (DECISIONS_MODEL)")
@@ -440,19 +451,29 @@ async def navigate(req: NavigateRequest):
         raise HTTPException(400, "Пустое описание товара")
     if len(description) > MAX_DESCRIPTION_LEN:
         raise HTTPException(400, f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)")
-    candidates = None
-    if req.path is None:
-        candidates = await asyncio.to_thread(navigator.candidate_headings, store, state.prec,
-                                             description, set(state.tree.roots))
+    visitor, quota = None, None
+    if req.path is None and limits.enabled:
+        visitor, email = limits.visitor(request.headers, request.client.host if request.client else "")
+        used, limit = limits.take(visitor, email)
+        quota = {"used": used, "limit": limit, "email": email} if limit else None
 
     async def decide(text: str, instructions: str, criteria: dict[str, str]):
         return await decisions.choose(state.dec, text, instructions, criteria)
 
     try:
+        candidates = None
+        if req.path is None:
+            candidates = await asyncio.to_thread(navigator.candidate_headings, store, state.prec,
+                                                 description, set(state.tree.roots))
         res = await navigator.navigate(state.tree, description, decide, path=req.path,
                                        candidates=candidates)
     except KeyError as e:
         raise HTTPException(400, f"Пути нет в дереве: {e}") from None
+    except BaseException:
+        if visitor is not None:
+            limits.refund(visitor)
+        raise
+    res["quota"] = quota  # сколько товаров подобрано сегодня из скольких; None — без лимита
     res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]
     res["card"] = store.code_card(res["code"]) if res["digits"] >= 4 else None
     print(f"[nav] {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
@@ -495,7 +516,9 @@ async def health():
         "precedents": None if state.prec is None else {"names": len(state.prec.names)},
         "navigator": None if state.tree is None else {"model": state.dec.model,
                                                       "headings": len(state.tree.roots),
-                                                      "threshold": navigator.NAV_THRESHOLD},
+                                                      "threshold": navigator.NAV_THRESHOLD,
+                                                      "limits": {"free": limits.free, "email": limits.email,
+                                                                 "cap": limits.cap} if limits.enabled else None},
         "state": "sqlite" if state.persist is not None else "memory",
         "batch": {s: sum(j.get("status") == s for j in state.batch_jobs.values()) for s in ("running", "queued")},
     }

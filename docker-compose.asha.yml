@@ -24,6 +24,7 @@ services:
       DECISIONS_MODEL: ${DECISIONS_MODEL:-}
       NAV_THRESHOLD: ${NAV_THRESHOLD:-0.8}
       NAV_CANDIDATES: ${NAV_CANDIDATES:-8}
+      NAV_CACHE_SIZE: ${NAV_CACHE_SIZE:-2000}
       # Лимиты открытой страницы (nav_limits.py); 0 — выключены.
       NAV_FREE_PER_DAY: ${NAV_FREE_PER_DAY:-0}
       NAV_EMAIL_PER_DAY: ${NAV_EMAIL_PER_DAY:-10}

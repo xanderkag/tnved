@@ -102,6 +102,11 @@ class Limits:
         self.total += 1
         return self.used[key], limit
 
+    def status(self, key: str, email: bool) -> tuple[int, int]:
+        """(подобрано сегодня, лимит) без списания — для ответа из кэша."""
+        self._roll()
+        return self.used.get(key, 0), (self.email if email else self.free) if self.free else 0
+
     def refund(self, key: str) -> None:
         if self.used.get(key):  # после смены суток счётчик уже пуст — возвращать нечего
             self.used[key] -= 1

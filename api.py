@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -55,6 +56,9 @@ SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_HOURS", "24")) * 3600
 CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "600"))
 # Пакетов одновременно (B6): модель общая с parsdocs, второй пакет ждёт в очереди (status queued).
 BATCH_MAX_RUNNING = int(os.environ.get("BATCH_MAX_RUNNING", "1"))
+# Кэш навигатора: тот же товар и тот же путь — тот же ответ, без похода в модель и без
+# списания лимита. В памяти, перезапуск обнуляет; дерево меняется только с перезапуском.
+NAV_CACHE_SIZE = int(os.environ.get("NAV_CACHE_SIZE", "2000"))
 BATCH_SAVE_SECONDS = 5  # прогресс пакета на диск — не чаще; после перезапуска повторяются только несохранённые строки
 
 
@@ -88,6 +92,12 @@ class App:
 
 state = App()
 limits = nav_limits.Limits()
+_nav_cache: OrderedDict[tuple, dict] = OrderedDict()
+
+
+def _nav_key(description: str, path: list[str] | None) -> tuple:
+    """Регистр, пробелы и точка в конце описания ответа не меняют — в ключе их нет."""
+    return re.sub(r"\s+", " ", description.lower()).strip(" ."), None if path is None else tuple(path)
 _batch_slots: asyncio.Semaphore | None = None  # BATCH_MAX_RUNNING, создаётся в lifespan — в цикле сервиса
 _batch_tasks: set[asyncio.Task] = set()  # ссылки на задачи пакетов, иначе сборщик мусора может их снять
 
@@ -442,7 +452,8 @@ async def navigate(req: NavigateRequest, request: Request):
     Без сессии: клиент держит описание и шлёт path выбранного варианта вопроса. Ответ —
     код на столько знаков, сколько известно (digits), путь, шаги с вероятностями и
     question, если дальше без человека не пройти; done — дошли до 10-значного кода.
-    Лимиты (nav_limits) считают новые товары — запросы без path."""
+    Лимиты (nav_limits) считают новые товары — запросы без path. Повтор того же запроса
+    отдаётся из кэша (cached: true): без модели и без списания лимита."""
     store = _require_store()
     if state.tree is None or state.dec is None:
         raise HTTPException(503, "Навигатор выключен: канал решений не настроен (DECISIONS_MODEL)")
@@ -451,11 +462,19 @@ async def navigate(req: NavigateRequest, request: Request):
         raise HTTPException(400, "Пустое описание товара")
     if len(description) > MAX_DESCRIPTION_LEN:
         raise HTTPException(400, f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)")
+    key = _nav_key(description, req.path)
     visitor, quota = None, None
     if req.path is None and limits.enabled:
         visitor, email = limits.visitor(request.headers, request.client.host if request.client else "")
-        used, limit = limits.take(visitor, email)
+        if key in _nav_cache:  # повтор уже подобранного товара лимит не тратит
+            used, limit = limits.status(visitor, email)
+            visitor = None
+        else:
+            used, limit = limits.take(visitor, email)
         quota = {"used": used, "limit": limit, "email": email} if limit else None
+    if key in _nav_cache:
+        _nav_cache.move_to_end(key)
+        return _nav_cache[key] | {"quota": quota, "cost_usd": 0.0, "cached": True}
 
     async def decide(text: str, instructions: str, criteria: dict[str, str]):
         return await decisions.choose(state.dec, text, instructions, criteria)
@@ -476,8 +495,13 @@ async def navigate(req: NavigateRequest, request: Request):
     res["quota"] = quota  # сколько товаров подобрано сегодня из скольких; None — без лимита
     res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]
     res["card"] = store.code_card(res["code"]) if res["digits"] >= 4 else None
+    res["cached"] = False
     print(f"[nav] {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
           f"вопрос {'да' if res['question'] else 'нет'}, ${res['cost_usd']}")
+    if NAV_CACHE_SIZE:
+        _nav_cache[key] = res
+        while len(_nav_cache) > NAV_CACHE_SIZE:
+            _nav_cache.popitem(last=False)
     return res
 
 
@@ -517,6 +541,7 @@ async def health():
         "navigator": None if state.tree is None else {"model": state.dec.model,
                                                       "headings": len(state.tree.roots),
                                                       "threshold": navigator.NAV_THRESHOLD,
+                                                      "cached": len(_nav_cache),
                                                       "limits": {"free": limits.free, "email": limits.email,
                                                                  "cap": limits.cap} if limits.enabled else None},
         "state": "sqlite" if state.persist is not None else "memory",

@@ -38,6 +38,7 @@ from classifier import (
     normalize_input,
     triage,
 )
+import conformity
 import declarations
 import decisions
 import nav_limits
@@ -82,6 +83,7 @@ class App:
     store: TNVEDStore | None = None
     decl: declarations.DeclarationIndex | None = None  # уровень 1 — ДТ; None — выключен
     prec: precedents.PrecedentIndex | None = None  # позиции похожих товаров из реестров ФСА; None — выключен
+    conf: conformity.Conformity | None = None  # техрегламенты и вид документа по коду из реестров ФСА (PAY-1)
     dec: decisions.DecisionsConfig | None = None  # DECISIONS_MODEL; None — навигатор выключен
     tree: navigator.Tree | None = None
     persist: state_store.StateStore | None = None  # STATE_DB_PATH; None — только в памяти
@@ -159,6 +161,8 @@ async def lifespan(app: FastAPI):
     state.decl = declarations.load_from_env()
     # PRECEDENTS_PATH — так же: задан и не читается — не стартуем.
     state.prec = precedents.load_from_env()
+    # CONFORMITY_PATH — так же.
+    state.conf = conformity.load_from_env()
     # STATE_DB_PATH — так же: задан и не открывается — не стартуем; не задан — только в памяти.
     state.persist = state_store.load_from_env()
     if state.persist is not None:
@@ -494,7 +498,7 @@ async def navigate(req: NavigateRequest, request: Request):
         raise
     res["quota"] = quota  # сколько товаров подобрано сегодня из скольких; None — без лимита
     res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]
-    res["card"] = store.code_card(res["code"]) if res["digits"] >= 4 else None
+    res["card"] = _card(store, res["code"]) if res["digits"] >= 4 else None
     res["cached"] = False
     print(f"[nav] {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
           f"вопрос {'да' if res['question'] else 'нет'}, ${res['cost_usd']}")
@@ -538,6 +542,8 @@ async def health():
             "description_vectors": 0 if state.decl.desc_vecs is None else len(state.decl.desc_vecs),
         },
         "precedents": None if state.prec is None else {"names": len(state.prec.names)},
+        "conformity": None if state.conf is None else {"codes": len(state.conf.by_code),
+                                                       "period": state.conf.period},
         "navigator": None if state.tree is None else {"model": state.dec.model,
                                                       "headings": len(state.tree.roots),
                                                       "threshold": navigator.NAV_THRESHOLD,
@@ -618,7 +624,8 @@ async def codes_export():
 
 @app.get("/api/codes/{code}")
 async def code_card(code: str):
-    """Карточка кода: статус (current | retired | not_leaf), путь по дереву, пошлина.
+    """Карточка кода: статус (current | retired | not_leaf), путь по дереву, пошлина и, если
+    подключён свод ФСА, техрегламенты и доля сертификатов под кодом (conformity).
 
     Кода нет — 404, а не ближайший похожий: подставленный код хуже отказа.
     """
@@ -626,9 +633,17 @@ async def code_card(code: str):
     code = re.sub(r"[\s.]", "", code)
     if not CODE_RE.fullmatch(code):
         raise HTTPException(400, "Код ТН ВЭД — 2, 4, 6, 8 или 10 цифр")
-    card = store.code_card(code)
+    card = _card(store, code)
     if card is None:
         raise HTTPException(404, f"Кода {code} нет в справочнике")
+    return card
+
+
+def _card(store: TNVEDStore, code: str) -> dict | None:
+    """Карточка кода и, справочно, что оформляли под ним по реестрам ФСА (conformity)."""
+    card = store.code_card(code)
+    if card is not None and state.conf is not None:
+        card["conformity"] = state.conf.lookup(code) if len(code) >= 4 else None
     return card
 
 

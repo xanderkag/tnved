@@ -47,6 +47,8 @@ services:
       # соответствия, подсказка triage. Свод — тоже в ./incoming; не задан — выключено.
       PRECEDENTS_PATH: ${PRECEDENTS_PATH:-}
       PRECEDENTS_NEIGHBOURS: ${PRECEDENTS_NEIGHBOURS:-}
+      # Техрегламенты и вид документа по коду (PAY-1) — свод из тех же реестров ФСА, в ./incoming.
+      CONFORMITY_PATH: ${CONFORMITY_PATH:-}
       # Сессии, чаты и пакеты — на диске хоста (./state), перезапуск и выкат их не теряют;
       # незаконченный пакет продолжается с места обрыва. Пусто — только в памяти.
       STATE_DB_PATH: ${STATE_DB_PATH-/app/state/state.db}

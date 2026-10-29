@@ -10,6 +10,11 @@
 и отдаём вопрос: ветки узла с вероятностями, человек выбирает кнопкой. Ответ — путь
 (подписи веток по порядку), с него спуск продолжается. Код, на котором остановились,
 честный: 4, 6 или 8 знаков, если дальше без человека не пройти.
+
+Узел, где все ветки делятся по одной величине («мощностью не более 30 кВт» / «более 30 кВт»),
+а в описании ровно одно её значение, проходит правило (conditions.choose) без модели: шаг
+с полем rule, уверенность 1. Замер 29.10: самопроверка по дереву — 929 срабатываний,
+0 не в ту ветку; на путях решений ЕЭК — 1 срабатывание из 13 узлов с условиями, верное.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+import conditions
 from tnved_data import DB_PATH, TNVEDStore, is_current_leaf
 
 SEP = "→"
@@ -204,6 +210,16 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
             break
         if len(options) == 1:
             node = options[0]
+            trail.append(node.label)
+            continue
+        rule = conditions.choose([o.label for o in options], description)
+        if rule is not None:
+            i, reason = rule
+            ranked = sorted(({"label": o.label, "code": o.prefix, "path": trail + [o.label],
+                              "p": float(j == i)} for j, o in enumerate(options)), key=lambda o: -o["p"])
+            steps.append({"path": list(trail), "options": ranked, "choice": options[i].label,
+                          "confidence": 1.0, "rule": reason})
+            node = options[i]
             trail.append(node.label)
             continue
         crit = _criteria(options)

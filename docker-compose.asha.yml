@@ -19,6 +19,11 @@ services:
       EMBEDDINGS_BASE_URL: http://embed:11434/v1
       EMBEDDINGS_MODEL: bge-m3
       LLM_API_KEY_FILE: /run/secrets/llm_key
+      # Навигатор (/api/navigate): канал решений шлюза, сейчас «jev». Только здесь, не в
+      # docker-compose.yml: Jev считает у внешнего поставщика, в Taipit переменная не доходит.
+      DECISIONS_MODEL: ${DECISIONS_MODEL:-}
+      NAV_THRESHOLD: ${NAV_THRESHOLD:-0.8}
+      NAV_CANDIDATES: ${NAV_CANDIDATES:-8}
     secrets:
       - llm_key
     # Шлюз — на этом же хосте за его nginx. Имя шлюза резолвим в адрес хоста в сети

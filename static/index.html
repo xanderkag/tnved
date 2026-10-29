@@ -24,6 +24,7 @@
 
         <nav class="top-tabs">
             <button class="top-tab active" data-tab="single">Один товар</button>
+            <button class="top-tab" data-tab="nav" id="nav-tab-btn" hidden>Навигатор</button>
             <button class="top-tab" data-tab="batch">Пакет (Excel)</button>
             <button class="top-tab" data-tab="chat">Чат</button>
         </nav>
@@ -171,6 +172,30 @@
         </section>
 
         </div><!-- /tab-single -->
+
+
+        <!-- ═══════════ РЕЖИМ: НАВИГАТОР ═══════════ -->
+        <!-- Вкладку показывает /health (navigator не null): только там, где включён канал решений. -->
+        <div id="tab-nav" hidden>
+            <div class="card">
+                <label for="nav-description">Описание товара</label>
+                <textarea id="nav-description" rows="3" maxlength="5000"
+                    placeholder="Например: насос центробежный погружной для скважины, 1,1 кВт"></textarea>
+                <p class="hint">
+                    Код идёт по дереву ТН ВЭД: на каждой развилке модель выбирает ветку и называет
+                    вероятность. Если уверенности мало — спросит вас кнопками. Код показывается
+                    на столько знаков, сколько известно.
+                </p>
+                <div class="row row-spread">
+                    <span></span>
+                    <button id="nav-start-btn" class="primary">
+                        <span>Подобрать код</span>
+                        <span class="kbd">⌘ ↵</span>
+                    </button>
+                </div>
+            </div>
+            <div id="nav-result"></div>
+        </div><!-- /tab-nav -->
 
 
         <!-- ═══════════ РЕЖИМ: ПАКЕТ (EXCEL) ═══════════ -->

@@ -232,7 +232,12 @@ async def llm_unavailable(request: Request, exc: LLMUnavailable):
 
 @app.exception_handler(decisions.DecisionsUnavailable)
 async def decisions_unavailable(request: Request, exc: decisions.DecisionsUnavailable):
-    return JSONResponse(status_code=503, content={"detail": str(exc)})
+    headers = None
+    if exc.quota:  # бюджет шлюза обнуляется в 00:00 UTC
+        now = datetime.utcnow()
+        reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        headers = {"Retry-After": str(int((reset - now).total_seconds()))}
+    return JSONResponse(status_code=503, content={"detail": str(exc)}, headers=headers)
 
 
 @app.exception_handler(EmbeddingsUnavailable)

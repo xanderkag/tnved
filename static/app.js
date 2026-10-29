@@ -39,15 +39,15 @@ async function loadModel() {
 
 document.addEventListener("DOMContentLoaded", () => {
     loadModel();
+    loadNavigator();
 
-    // Top-level tabs (single / batch / chat)
+    // Top-level tabs (single / nav / batch / chat)
     qsa(".top-tab").forEach(btn => {
         btn.addEventListener("click", () => {
-            const tab = btn.dataset.tab;
-            qsa(".top-tab").forEach(b => b.classList.toggle("active", b === btn));
-            $("tab-single").hidden = tab !== "single";
-            $("tab-batch").hidden = tab !== "batch";
-            $("tab-chat").hidden = tab !== "chat";
+            qsa(".top-tab").forEach(b => {
+                b.classList.toggle("active", b === btn);
+                $(`tab-${b.dataset.tab}`).hidden = b !== btn;
+            });
         });
     });
 
@@ -72,6 +72,16 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             onStart();
+        }
+    });
+
+    // Navigator
+    $("nav-start-btn").addEventListener("click", onNavStart);
+    $("nav-result").addEventListener("click", onNavClick);
+    $("nav-description").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onNavStart();
         }
     });
 
@@ -420,6 +430,195 @@ function renderResultStep(data) {
     `;
     // Копировать нечего — прячем (disabled снял бы setBusy(false)).
     $("copy-result-btn").hidden = !primary.code;
+}
+
+
+// ─── навигатор (ALG-3) ────────────────────────────────────────────────────────
+// Код идёт по дереву, модель на развилке выбирает ветку. Сессии нет: держим описание
+// и шлём path выбранного варианта. history — ответы сервера, для «← Назад».
+
+const NAV_SHOWN = 6;
+
+const navState = {
+    description: "",
+    history: [],
+    busy: false,
+};
+
+async function loadNavigator() {
+    try {
+        const r = await fetch("/health");
+        $("nav-tab-btn").hidden = !(r.ok && (await r.json()).navigator);
+    } catch (e) {
+        console.warn("Не удалось загрузить /health:", e);
+    }
+}
+
+function onNavStart() {
+    const description = $("nav-description").value.trim();
+    if (!description) {
+        flashError("Опишите товар");
+        return;
+    }
+    navState.description = description;
+    navState.history = [];
+    renderNav(undefined);
+    navRequest(undefined);
+}
+
+// path: undefined — первый шаг (позиции-кандидаты), [] — от корня, иначе — путь варианта.
+async function navRequest(path) {
+    if (navState.busy) return;
+    navState.busy = true;
+    setBusy(true);
+    setStatus("Иду по дереву…");
+    try {
+        const body = { description: navState.description };
+        if (path !== undefined) body.path = path;
+        const r = await fetch("/api/navigate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+        navState.history.push(data);
+        renderNav(data);
+        setStatus("");
+    } catch (e) {
+        flashError(e.message);
+    } finally {
+        navState.busy = false;
+        setBusy(false);
+    }
+}
+
+function onNavClick(e) {
+    const current = navState.history[navState.history.length - 1];
+    const option = e.target.closest(".nav-option");
+    if (option && current && current.question) {
+        navRequest(current.question.options[Number(option.dataset.i)].path);
+    } else if (e.target.closest("#nav-back-btn")) {
+        navState.history.pop();
+        renderNav(navState.history[navState.history.length - 1]);
+    } else if (e.target.closest("#nav-copy-btn") && current) {
+        navigator.clipboard.writeText(current.code).then(() => setStatus("Код скопирован"));
+    }
+}
+
+// «8413 70 ··· ·»: известные знаки и точки на месте неизвестных, разбивка 4-2-3-1.
+function navCodeHtml(code) {
+    let html = "";
+    for (let i = 0; i < 10; i++) {
+        if (i === 4 || i === 6 || i === 9) html += " ";
+        html += i < code.length ? escapeHtml(code[i]) : `<span class="nav-dim">·</span>`;
+    }
+    return html;
+}
+
+function navGroupCode(code) {
+    return [code.slice(0, 4), code.slice(4, 6), code.slice(6, 9), code.slice(9)].filter(Boolean).join(" ");
+}
+
+function renderNav(d) {
+    if (!d) {
+        $("nav-result").innerHTML = "";
+        return;
+    }
+    const pct = (p) => `${Math.round(p * 100)}%`;
+    // Подписи групп и позиций начинаются с кода («8413 Насосы…») — код и так в отдельной колонке.
+    const optionText = (o) => niceText(o.code ? o.label.replace(/^\d{2,4}\s+/, "") : o.label);
+    const q = d.question;
+    // От корня вариантов под сотню: на виду самые вероятные и «другая позиция», остальное свёрнуто.
+    const indexed = q ? q.options.map((o, i) => ({ ...o, i })) : [];
+    const shown = indexed.filter((o, k) => k < NAV_SHOWN || o.path.length === 0);
+    const rest = indexed.filter(o => !shown.includes(o));
+    const optionHtml = (o) => `
+        <button class="nav-option" data-i="${o.i}">
+            <span class="nav-option-p">${pct(o.p)}</span>
+            <span class="nav-option-text">${o.code ? `<code>${escapeHtml(navGroupCode(o.code))}</code>` : ""}${escapeHtml(optionText(o))}</span>
+        </button>`;
+
+    const pathHtml = d.path.length
+        ? `<div class="nav-path">${d.path.map(s => escapeHtml(niceText(s))).join(`<span class="nav-sep">→</span>`)}</div>`
+        : "";
+
+    const questionHtml = q
+        ? `<div class="nav-question">
+            <div class="q-number">Нужен ваш выбор</div>
+            <label>${escapeHtml(q.text.replace(/\s*\(.*\):$/, ":"))}</label>
+            <div class="nav-options">${shown.map(optionHtml).join("")}</div>
+            ${rest.length
+                ? `<details class="result-section">
+                    <summary>Показать все · ещё ${rest.length}</summary>
+                    <div class="nav-options">${rest.map(optionHtml).join("")}</div>
+                   </details>`
+                : ""}
+           </div>`
+        : "";
+
+    const codesHtml = !d.done && d.codes.length
+        ? `<details class="result-section">
+            <summary>Коды под этим узлом · ${d.n_codes}</summary>
+            <div class="hierarchy hierarchy-stacked nav-steps">
+                ${d.codes.map(c => `
+                    <div class="hier-row">
+                        <code>${escapeHtml(c.code)}</code>
+                        <span>${escapeHtml(niceText(c.name))}</span>
+                    </div>
+                `).join("")}
+                ${d.n_codes > d.codes.length ? `<div class="hint">и ещё ${d.n_codes - d.codes.length}</div>` : ""}
+            </div>
+           </details>`
+        : "";
+
+    // Шаги всех запросов этого товара. Там, где спросили человека, ветку выбрал он, а не модель.
+    const steps = navState.history.flatMap((h, k) => h.steps.map(st => ({
+        ...st, asked: Boolean(h.question) && st === h.steps[h.steps.length - 1] && k < navState.history.length - 1,
+    })));
+    const stepsHtml = steps.length
+        ? `<details class="result-section">
+            <summary>Как шёл выбор · ${steps.length}</summary>
+            <div class="hierarchy hierarchy-stacked nav-steps">
+                ${steps.map(st => `
+                    <div class="hier-row">
+                        <code>${pct(st.confidence)}</code>
+                        <span>${st.asked ? "спросили вас; модель склонялась к: " : ""}${escapeHtml(niceText(st.choice))}</span>
+                    </div>
+                `).join("")}
+            </div>
+           </details>`
+        : "";
+
+    const status = d.done
+        ? `🟢 <strong>код до конца</strong>`
+        : q ? `🟡 <strong>нужен ваш выбор</strong>` : `⚪ <strong>дальше не различить</strong>`;
+    const card = d.card;
+
+    $("nav-result").innerHTML = `
+        <div class="card result-card">
+            <div class="result-head">
+                <div class="result-label">Код ТН ВЭД ЕАЭС · известно ${d.digits} из 10 знаков</div>
+                <div class="result-confidence">${status}</div>
+            </div>
+            <div class="result-code-row">
+                <div class="result-code">${navCodeHtml(d.code)}</div>
+                ${card ? dutyBadge(card.duty_rate, "large") : ""}
+            </div>
+            ${d.done && card ? `<div class="result-shortname">${escapeHtml(niceText(card.name))}</div>` : ""}
+            ${pathHtml}
+            ${questionHtml}
+            ${codesHtml}
+            ${stepsHtml}
+            <p class="hint nav-disclaimer">
+                Подсказка, а не решение о классификации: код в декларации выбирает и подтверждает декларант.
+            </p>
+            <div class="row" style="gap: 0.5rem;">
+                ${navState.history.length > 1 ? `<button id="nav-back-btn" class="ghost">← Назад</button>` : ""}
+                ${d.done ? `<button id="nav-copy-btn" class="primary">Скопировать код</button>` : ""}
+            </div>
+        </div>
+    `;
 }
 
 

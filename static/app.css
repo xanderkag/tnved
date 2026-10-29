@@ -1494,3 +1494,88 @@ details.result-section > *:not(summary) {
     font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: 0.8125rem;
 }
+
+
+/* ─── навигатор ─────────────────────────────────────────────────────────── */
+
+.nav-path {
+    margin-top: 0.75rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.nav-sep {
+    margin: 0 0.4rem;
+    color: var(--text-dim);
+}
+
+.nav-dim {
+    color: var(--text-dim);
+}
+
+.nav-question {
+    margin-top: 1.25rem;
+}
+
+.nav-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+button.nav-option {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 0.75rem;
+    white-space: normal;
+    user-select: text;
+    width: 100%;
+    padding: 0.7rem 0.9rem;
+    text-align: left;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font: inherit;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+button.nav-option:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+}
+
+.nav-option-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.nav-option-p {
+    flex: 0 0 3rem;
+    text-align: right;
+    color: var(--text-muted);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.nav-option-text code {
+    margin-right: 0.5rem;
+    color: var(--accent-hover);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.nav-steps {
+    align-items: stretch;
+}
+
+.nav-steps .hier-row > code {
+    min-width: 2.5rem;
+    text-align: right;
+}
+
+.nav-disclaimer {
+    margin-top: 1rem;
+}

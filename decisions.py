@@ -38,7 +38,12 @@ class DecisionsConfig(BaseModel):
 
 
 class DecisionsUnavailable(RuntimeError):
-    """Канал решений не ответил или отказал."""
+    """Канал решений не ответил или отказал. quota — исчерпан суточный бюджет потребителя:
+    до 00:00 UTC повторять бессмысленно."""
+
+    def __init__(self, message: str, quota: bool = False):
+        super().__init__(message)
+        self.quota = quota
 
 
 def decisions_config_from_env(llm: LLMConfig) -> DecisionsConfig | None:
@@ -88,6 +93,9 @@ async def choose(cfg: DecisionsConfig, state: str, instructions: str, criteria: 
                 raise DecisionsUnavailable(f"Канал решений {cfg.model} не ответил: {problem}")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
+    if _quota_exceeded(resp):
+        raise DecisionsUnavailable("Дневной лимит модели исчерпан, сброс в 00:00 UTC (03:00 МСК)",
+                                   quota=True)
     if resp.status_code != 200:
         raise DecisionsUnavailable(f"Канал решений {cfg.model}: HTTP {resp.status_code} {resp.text[:200]}")
     data = resp.json()

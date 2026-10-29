@@ -536,7 +536,7 @@ function renderNav(d) {
     const optionHtml = (o) => `
         <button class="nav-option" data-i="${o.i}">
             <span class="nav-option-p">${pct(o.p)}</span>
-            <span class="nav-option-text">${o.code ? `<code>${escapeHtml(navGroupCode(o.code))}</code>` : ""}${escapeHtml(optionText(o))}</span>
+            <span class="nav-option-text">${o.code ? `<code>${escapeHtml(navGroupCode(o.code))}</code>` : ""}${escapeHtml(optionText(o))}${o.note ? `<span class="nav-option-note">${escapeHtml(o.note)}</span>` : ""}</span>
         </button>`;
 
     const pathHtml = d.path.length
@@ -582,10 +582,29 @@ function renderNav(d) {
             <div class="hierarchy hierarchy-stacked nav-steps">
                 ${steps.map(st => `
                     <div class="hier-row">
-                        <code>${pct(st.confidence)}</code>
-                        <span>${st.asked ? "спросили вас; модель склонялась к: " : ""}${escapeHtml(niceText(st.choice))}</span>
+                        <code>${st.rule ? "число" : pct(st.confidence)}</code>
+                        <span>${st.asked ? "спросили вас; модель склонялась к: " : ""}${escapeHtml(niceText(st.choice))}${st.rule ? ` <span class="hint">· по описанию: ${escapeHtml(st.rule)}</span>` : ""}</span>
                     </div>
                 `).join("")}
+            </div>
+           </details>`
+        : "";
+
+    // Практика заявителей по реестрам ФСА: какие ТР ТС указывают на этот код и как часто сертификат.
+    const conf = d.card && d.card.conformity;
+    const confHtml = conf
+        ? `<details class="result-section" open>
+            <summary>Подтверждение соответствия · ${conf.documents.toLocaleString("ru-RU")} документов</summary>
+            <div class="hierarchy hierarchy-stacked nav-steps">
+                ${conf.regulations.map(r => `
+                    <div class="hier-row">
+                        <code>${pct(r.share)}</code>
+                        <span>${escapeHtml(r.number ? `${r.number} · ${r.name}` : r.name)}</span>
+                    </div>
+                `).join("")}
+                <div class="hint">Сертификат — в ${pct(conf.certificate_share)} документов, остальное — декларации.
+                    ${conf.digits < d.code.length ? `По коду мало документов, показано по ${conf.digits} знакам (${escapeHtml(conf.code)}).` : ""}
+                    ${escapeHtml(conf.source)}, ${escapeHtml(conf.period)}. ${escapeHtml(conf.note)}</div>
             </div>
            </details>`
         : "";
@@ -608,6 +627,7 @@ function renderNav(d) {
             ${d.done && card ? `<div class="result-shortname">${escapeHtml(niceText(card.name))}</div>` : ""}
             ${pathHtml}
             ${questionHtml}
+            ${confHtml}
             ${codesHtml}
             ${stepsHtml}
             <p class="hint nav-disclaimer">

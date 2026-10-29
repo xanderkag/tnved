@@ -158,6 +158,35 @@ def quantities(text: str) -> list[tuple[str, float, tuple[str, ...]]]:
 _OTHER = re.compile(r"^\s*проч", re.I)
 
 
+DIM_NAME = {"power": "мощности", "hp": "мощности", "disp": "рабочего объёма двигателя", "mass": "массы",
+            "length": "размера", "volume": "объёма", "density": "поверхностной плотности",
+            "pct": "содержания (мас.%)", "volpct": "крепости (об.%)", "voltage": "напряжения",
+            "kva": "мощности (кВА)", "dtex": "линейной плотности нити", "pressure": "давления"}
+
+
+# Как назвать значение человеку: величина в именительном и базовая единица.
+SHOW = {"power": ("мощность", "кВт"), "hp": ("мощность", "л.с."), "disp": ("рабочий объём", "см³"),
+        "mass": ("масса", "кг"), "length": ("размер", "мм"), "volume": ("объём", "л"),
+        "density": ("плотность", "г/м²"), "pct": ("содержание", "мас.%"), "volpct": ("крепость", "об.%"),
+        "voltage": ("напряжение", "В"), "kva": ("мощность", "кВА"), "dtex": ("линейная плотность", "дтекс"),
+        "pressure": ("давление", "МПа")}
+
+
+def _shown(dim: str, v: float) -> str:
+    name, unit = SHOW[dim]
+    return f"{name} {v:g} {unit}".replace(".", ",", 1) if v != int(v) else f"{name} {v:g} {unit}"
+
+
+def split_by(labels: list[str]) -> str | None:
+    """Если ветки узла (кроме «прочих») — диапазоны одной величины: её название для вопроса
+    человеку («Код зависит от мощности»). Иначе None."""
+    named = [parse_label(l) for l in labels if not _OTHER.match(l)]
+    if not named or any(not c for c in named):
+        return None
+    common = set.intersection(*({x.dim for x in c} for c in named))
+    return DIM_NAME[sorted(common)[0]] if common else None
+
+
 def choose(labels: list[str], description: str) -> tuple[int, str] | None:
     """Индекс ветки по числу из описания и пояснение; None — правило не применимо."""
     conds = [None if _OTHER.match(l) else parse_label(l) for l in labels]
@@ -180,7 +209,7 @@ def choose(labels: list[str], description: str) -> tuple[int, str] | None:
         hits = [i for i, c in enumerate(conds) if c is not None and next(x for x in c if x.dim == dim).holds(v)]
         others = [i for i, c in enumerate(conds) if c is None]
         if len(hits) == 1:
-            return hits[0], f"{dim} = {v:g}"
+            return hits[0], _shown(dim, v)
         if not hits and len(others) == 1:
-            return others[0], f"{dim} = {v:g}: ни один диапазон, значит «прочие»"
+            return others[0], f"{_shown(dim, v)} — ни под один диапазон, значит «прочие»"
     return None

@@ -279,7 +279,7 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
         steps.append({"path": list(trail), "options": ranked,
                       "choice": by_key[ans.choice].label, "confidence": round(ans.confidence, 3)})
         if ans.confidence < threshold:
-            question = {"path": list(trail), "text": _question_text(node), "options": ranked}
+            question = {"path": list(trail), "text": _question_text(node, options), "options": _noted(ranked)}
             break
         node = by_key[ans.choice]
         trail.append(node.label)
@@ -293,7 +293,21 @@ def _result(node: Node, trail: list[str], steps: list[dict], question: dict | No
             "cost_usd": round(cost, 6)}
 
 
-def _question_text(node: Node) -> str:
+def _question_text(node: Node, options: list[Node]) -> str:
     if node.label == "ТН ВЭД ЕАЭС":
-        return "Уточните, к чему ближе товар:"
+        return "Уточните, к какому разделу ближе товар:"
+    by = conditions.split_by([o.label for o in options])
+    if by:
+        return (f"Код зависит от {by} — выберите диапазон или допишите значение в описание "
+                f"({node.label[:160]}):")
     return f"Уточните, что из этого подходит товару ({node.label[:160]}):"
+
+
+def _noted(ranked: list[dict]) -> list[dict]:
+    """«Прочие» человеку ничего не говорят: note — от чего они прочие (подписи соседей)."""
+    others = [o["label"] for o in ranked if not _OTHER.match(o["label"])]
+    for o in ranked:
+        if _OTHER.match(o["label"]) and len(o["label"]) < 25 and others:
+            o["note"] = "не подходит ни под один вариант: " + "; ".join(x[:60] for x in others[:4]) \
+                        + ("; …" if len(others) > 4 else "")
+    return ranked

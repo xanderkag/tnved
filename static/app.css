@@ -1554,6 +1554,13 @@ button.nav-option:hover {
     overflow-wrap: anywhere;
 }
 
+.nav-option-note {
+    display: block;
+    margin-top: 0.15rem;
+    color: var(--text-muted);
+    font-size: 0.85em;
+}
+
 .nav-option-p {
     flex: 0 0 3rem;
     text-align: right;

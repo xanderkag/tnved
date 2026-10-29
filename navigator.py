@@ -247,7 +247,7 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
         if ans.confidence < threshold:
             question = {"path": None, "text": "Уточните, к какой товарной позиции ближе товар:",
                         "options": ranked}
-            return _result(tree.top, [], steps, question, cost)
+            return _result(tree, tree.top, [], steps, question, cost)
         trail = list(target[ans.choice])
     node = tree.walk(trail)
     while True:
@@ -283,14 +283,35 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
             break
         node = by_key[ans.choice]
         trail.append(node.label)
-    return _result(node, trail, steps, question, cost)
+    return _result(tree, node, trail, steps, question, cost)
 
 
-def _result(node: Node, trail: list[str], steps: list[dict], question: dict | None, cost: float) -> dict:
-    return {"path": trail, "code": node.prefix, "digits": len(node.prefix),
+def _result(tree: Tree, node: Node, trail: list[str], steps: list[dict], question: dict | None,
+            cost: float) -> dict:
+    for o in [o for s in steps for o in s["options"]] + (question["options"] if question else []):
+        o.setdefault("name", node_name(o["label"]))
+        o.setdefault("short", _short(o["name"]))
+    ladder, up = [], tree.top
+    for label in trail:  # «лестница»: код и официальный текст на каждом уровне
+        up = next(o for o in up.options() if o.label == label)
+        ladder.append({"code": up.prefix, "name": node_name(label)})
+    return {"path": trail, "path_codes": ladder, "code": node.prefix, "digits": len(node.prefix),
             "codes": node.codes[:20], "n_codes": len(node.codes), "steps": steps,
             "question": question, "done": question is None and len(node.codes) == 1,
             "cost_usd": round(cost, 6)}
+
+
+def node_name(label: str) -> str:
+    """Официальный текст узла без кода группы или позиции; label — ключ пути."""
+    return re.sub(r"^\d{2}(?:\d{2})?\s+", "", label).strip() or label
+
+
+def _short(name: str, limit: int = 80) -> str:
+    """Для кнопки: до первой «;», не длиннее limit по границе слова."""
+    s = name.split(";")[0].strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit].rsplit(" ", 1)[0].rstrip(",:") + "…"
 
 
 def _question_text(node: Node, options: list[Node]) -> str:

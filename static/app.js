@@ -475,6 +475,8 @@ async function navRequest(path) {
     try {
         const body = { description: navState.description };
         if (path !== undefined) body.path = path;
+        const last = navState.history[navState.history.length - 1];
+        if (path !== undefined && last && last.request_id) body.request_id = last.request_id;
         const r = await fetch("/api/navigate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

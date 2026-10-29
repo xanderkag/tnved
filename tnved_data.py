@@ -34,6 +34,8 @@ LITE_TOP_K = int(os.environ.get("LITE_TOP_K", "120"))
 # 2017 (data_source='hierarchy') сняты: модель уверенно выбирала 9401300001 вместо
 # действующих 9401310000/9401390000 — с таким кодом декларацию не примут.
 CURRENT_SOURCES = ("hierarchy+tws", "tws")
+DUTY_SOURCE = ("ЕТТ ЕАЭС (Решение Совета ЕЭК от 14.09.2021 № 80, с изменениями), "
+               "по выгрузке тарифа TWS.BY")
 
 
 def is_current_leaf(item: dict) -> bool:
@@ -307,6 +309,7 @@ class TNVEDStore:
         status, item = self.code_status(code)
         if item is None:
             return None
+        version = self.version()
         return {
             "code": code,
             "status": status,
@@ -316,8 +319,16 @@ class TNVEDStore:
             "hierarchy": self.hierarchy(code),
             "duty_rate": item["duty_rate"],
             "data_source": item["data_source"],
-            **self.version(),
+            "duty": self._duty(item, version["tariff_as_of"]),
+            **version,
         }
+
+    def _duty(self, item: dict, as_of: str | None) -> dict | None:
+        """Ставка с нормой: без источника и даты сайт пошлину не показывает (KONTRAKT-2).
+        as_of — «Актуальность данных» выгрузки тарифа, а не дата вступления ставки в силу."""
+        if not item["duty_rate"] or item["data_source"] not in CURRENT_SOURCES:
+            return None
+        return {"rate": item["duty_rate"], "source": DUTY_SOURCE, "as_of": as_of}
 
     def group_info(self, group_code: str) -> dict | None:
         """Информация о группе (2 знака)."""

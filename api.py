@@ -447,6 +447,13 @@ class NavigateRequest(BaseModel):
     # Путь из ответа: question.options[].path выбранного варианта. Не задан — спуск
     # начинается с выбора среди позиций-кандидатов; [] — от корня, по группам.
     path: Optional[list[str]] = None
+    # request_id из первого ответа: связывает шаги одного товара в логе и в отзыве
+    # «код не подошёл». Не задан или не похож на наш — выдаётся новый.
+    request_id: Optional[str] = None
+
+
+NAV_MAX_DESCRIPTION_LEN = int(os.environ.get("NAV_MAX_DESCRIPTION_LEN", "1000"))
+_REQUEST_ID = re.compile(r"[0-9a-f]{32}")
 
 
 @app.post("/api/navigate")
@@ -463,9 +470,20 @@ async def navigate(req: NavigateRequest, request: Request):
         raise HTTPException(503, "Навигатор выключен: канал решений не настроен (DECISIONS_MODEL)")
     description = req.description.strip()
     if not description:
-        raise HTTPException(400, "Пустое описание товара")
-    if len(description) > MAX_DESCRIPTION_LEN:
-        raise HTTPException(400, f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)")
+        raise HTTPException(422, "Опишите товар: что это, из чего сделан и для чего.")
+    if len(description) > NAV_MAX_DESCRIPTION_LEN:
+        raise HTTPException(422, f"Описание длиннее {NAV_MAX_DESCRIPTION_LEN} символов — оставьте главное: "
+                                 "что это, из чего сделан, для чего, ключевые размеры.")
+    rid = req.request_id if req.request_id and _REQUEST_ID.fullmatch(req.request_id) else uuid.uuid4().hex
+    # Канал site (страница подбора, заголовок ставит nginx): стоимость вызова браузеру не отдаём.
+    public = request.headers.get("x-channel") == "site"
+
+    def out(res: dict, **extra) -> dict:
+        res = res | extra | {"request_id": rid}
+        if public:
+            res.pop("cost_usd", None)
+        return res
+
     key = _nav_key(description, req.path)
     visitor, quota = None, None
     if req.path is None and limits.enabled:
@@ -478,7 +496,7 @@ async def navigate(req: NavigateRequest, request: Request):
         quota = {"used": used, "limit": limit, "email": email} if limit else None
     if key in _nav_cache:
         _nav_cache.move_to_end(key)
-        return _nav_cache[key] | {"quota": quota, "cost_usd": 0.0, "cached": True}
+        return out(_nav_cache[key], quota=quota, cost_usd=0.0, cached=True)
 
     async def decide(text: str, instructions: str, criteria: dict[str, str]):
         return await decisions.choose(state.dec, text, instructions, criteria)
@@ -500,13 +518,13 @@ async def navigate(req: NavigateRequest, request: Request):
     res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]
     res["card"] = _card(store, res["code"]) if res["digits"] >= 4 else None
     res["cached"] = False
-    print(f"[nav] {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
+    print(f"[nav] {rid[:8]} {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
           f"вопрос {'да' if res['question'] else 'нет'}, ${res['cost_usd']}")
     if NAV_CACHE_SIZE:
         _nav_cache[key] = res
         while len(_nav_cache) > NAV_CACHE_SIZE:
             _nav_cache.popitem(last=False)
-    return res
+    return out(res)
 
 
 @app.get("/api/classify/{session_id}")

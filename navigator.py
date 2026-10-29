@@ -28,6 +28,24 @@ _OTHER = re.compile(r"^\s*проч", re.I)
 # Подпись ветки «прочие» сама по себе пуста: модель видит, от чего она «прочая».
 OTHER_HINT = "прочие — не подходящие ни под один другой вариант этого уровня"
 LABEL_LIMIT = 300
+# Позиции редакции 2022 без своей строки в справочнике (данные TWS, DATA-1): название — как
+# в full_path их кодов. У части их кодов ступени позиции в full_path нет вовсе — у таких дерево
+# берёт путь со второй ступени, иначе пропала бы первая развилка (у 8806 — «вертолеты»).
+MISSING_HEADINGS = {
+    "0309": "Мука тонкого и грубого помола и гранулы из рыбы, ракообразных, моллюсков и прочих водных "
+            "беспозвоночных, пригодные для употребления в пищу",
+    "2404": "Продукция, содержащая табак, восстановленный табак, никотин, или заменители табака или "
+            "никотина, предназначенная для вдыхания без горения; прочая продукция, содержащая никотин "
+            "и предназначенная для поступления никотина в организм человека",
+    "3827": "Смеси, содержащие галогенированные производные метана, этана или пропана, в другом месте "
+            "не поименованные или не включенные",
+    "8485": "Машины для аддитивного производства",
+    "8524": "Модули с плоской дисплейной панелью, в том числе с сенсорным экраном",
+    "8549": "Отходы и лом электротехнических и электронных изделий",
+    "8806": "Беспилотные летательные аппараты",
+    "8807": "Части летательных аппаратов товарной позиции 8801, 8802 или 8806",
+    "9620": "Моноопоры, двуноги, треноги и аналогичные изделия",
+}
 
 
 @dataclass
@@ -70,7 +88,7 @@ class Tree:
             h = code[:4]
             if h not in self.roots:
                 glabel = f"{h[:2]} {(names.get(h[:2]) or '').strip()}".strip()
-                hlabel = f"{h} {(names.get(h) or '').strip()}".strip()
+                hlabel = f"{h} {(names.get(h) or MISSING_HEADINGS.get(h, '')).strip()}".strip()
                 group = self.top.children.setdefault(glabel, Node(label=glabel))
                 self.roots[h] = group.children[hlabel] = Node(label=hlabel)
                 self.heading_path[h] = [glabel, hlabel]
@@ -78,7 +96,9 @@ class Tree:
             self.top.children[self.heading_path[h][0]].codes.append(code)
             node = self.roots[h]
             node.codes.append(code)
-            for seg in _levels(item)[2:]:
+            levels = _levels(item)
+            own_step = h in names or (len(levels) > 1 and _same(levels[1], MISSING_HEADINGS.get(h, "")))
+            for seg in levels[2 if own_step else 1:]:
                 node = node.children.setdefault(seg, Node(label=seg))
                 node.codes.append(code)
             node.own.append(code)
@@ -96,6 +116,10 @@ class Tree:
 
 def _levels(item: dict) -> list[str]:
     return [s.strip() for s in (item.get("full_path") or "").split(SEP) if s.strip()]
+
+
+def _same(a: str, b: str) -> bool:
+    return " ".join(a.lower().replace("ё", "е").split()) == " ".join(b.lower().replace("ё", "е").split())
 
 
 Decide = Callable[[str, str, dict[str, str]], Awaitable["object"]]

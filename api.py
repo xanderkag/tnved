@@ -38,6 +38,8 @@ from classifier import (
     triage,
 )
 import declarations
+import decisions
+import navigator
 import precedents
 import state_store
 from embedder import EmbeddingsUnavailable
@@ -75,6 +77,8 @@ class App:
     store: TNVEDStore | None = None
     decl: declarations.DeclarationIndex | None = None  # уровень 1 — ДТ; None — выключен
     prec: precedents.PrecedentIndex | None = None  # позиции похожих товаров из реестров ФСА; None — выключен
+    dec: decisions.DecisionsConfig | None = None  # DECISIONS_MODEL; None — навигатор выключен
+    tree: navigator.Tree | None = None
     persist: state_store.StateStore | None = None  # STATE_DB_PATH; None — только в памяти
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
@@ -168,6 +172,12 @@ async def lifespan(app: FastAPI):
         except EmbeddingsUnavailable as e:
             print(f"[decl] векторы описаний не построены, по описанию только дословно: {e}")
 
+    state.dec = decisions.decisions_config_from_env(state.llm)
+    if state.dec is not None and state.store is not None:
+        state.tree = navigator.Tree(state.store)
+        print(f"[nav] канал решений {state.dec.model}, позиций в дереве {len(state.tree.roots)}, "
+              f"порог {navigator.NAV_THRESHOLD}")
+
     global _batch_slots
     _batch_slots = asyncio.Semaphore(BATCH_MAX_RUNNING)
     # Пакеты, прерванные перезапуском, — дальше с первой необработанной строки, в прежнем порядке.
@@ -217,6 +227,11 @@ async def refuse_llm_headers(request: Request, call_next):
 
 @app.exception_handler(LLMUnavailable)
 async def llm_unavailable(request: Request, exc: LLMUnavailable):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(decisions.DecisionsUnavailable)
+async def decisions_unavailable(request: Request, exc: decisions.DecisionsUnavailable):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
@@ -398,6 +413,48 @@ async def classify_finalize(
     }
 
 
+class NavigateRequest(BaseModel):
+    description: str
+    # Путь из ответа: question.options[].path выбранного варианта. Не задан — спуск
+    # начинается с выбора среди позиций-кандидатов; [] — от корня, по группам.
+    path: Optional[list[str]] = None
+
+
+@app.post("/api/navigate")
+async def navigate(req: NavigateRequest):
+    """Навигатор (ALG-3): код спускается по дереву, канал решений выбирает ветку.
+
+    Без сессии: клиент держит описание и шлёт path выбранного варианта вопроса. Ответ —
+    код на столько знаков, сколько известно (digits), путь, шаги с вероятностями и
+    question, если дальше без человека не пройти; done — дошли до 10-значного кода."""
+    store = _require_store()
+    if state.tree is None or state.dec is None:
+        raise HTTPException(503, "Навигатор выключен: канал решений не настроен (DECISIONS_MODEL)")
+    description = req.description.strip()
+    if not description:
+        raise HTTPException(400, "Пустое описание товара")
+    if len(description) > MAX_DESCRIPTION_LEN:
+        raise HTTPException(400, f"Описание слишком длинное ({len(description)} > {MAX_DESCRIPTION_LEN} символов)")
+    candidates = None
+    if req.path is None:
+        candidates = await asyncio.to_thread(navigator.candidate_headings, store, state.prec,
+                                             description, set(state.tree.roots))
+
+    async def decide(text: str, instructions: str, criteria: dict[str, str]):
+        return await decisions.choose(state.dec, text, instructions, criteria)
+
+    try:
+        res = await navigator.navigate(state.tree, description, decide, path=req.path,
+                                       candidates=candidates)
+    except KeyError as e:
+        raise HTTPException(400, f"Пути нет в дереве: {e}") from None
+    res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]
+    res["card"] = store.code_card(res["code"]) if res["digits"] >= 4 else None
+    print(f"[nav] {res['code'] or '-'}: знаков {res['digits']}, шагов {len(res['steps'])}, "
+          f"вопрос {'да' if res['question'] else 'нет'}, ${res['cost_usd']}")
+    return res
+
+
 @app.get("/api/classify/{session_id}")
 async def classify_get(session_id: str):
     session = state.sessions.get(session_id)
@@ -431,6 +488,9 @@ async def health():
             "description_vectors": 0 if state.decl.desc_vecs is None else len(state.decl.desc_vecs),
         },
         "precedents": None if state.prec is None else {"names": len(state.prec.names)},
+        "navigator": None if state.tree is None else {"model": state.dec.model,
+                                                      "headings": len(state.tree.roots),
+                                                      "threshold": navigator.NAV_THRESHOLD},
         "state": "sqlite" if state.persist is not None else "memory",
         "batch": {s: sum(j.get("status") == s for j in state.batch_jobs.values()) for s in ("running", "queued")},
     }

@@ -9,15 +9,17 @@ Taipit); NAV_EMAIL_PER_DAY — с почтой; NAV_DAILY_CAP — новых т�
 товары, а не весь канал до 00:00 UTC. Сутки — UTC, как у квоты шлюза. Счётчики в памяти:
 перезапуск их обнуляет, это допустимо.
 
-Кто посетитель и оставил ли почту, говорит сайт: X-Visitor-Id и X-Visitor-Email: 1 (почта
-подтверждена) — только вместе с X-Site-Token, равным NAV_SITE_TOKEN. Без токена посетитель —
-адрес клиента и лимит без почты: заголовкам из браузера не верим. Почту сайт нам не передаёт.
-Сервис слушает только 127.0.0.1 за прокси, и адрес клиента для него — адрес прокси: с
-NAV_TRUST_PROXY=1 берём последний X-Forwarded-For — его дописывает наш прокси.
+Почту собирает и подтверждает сайт, нам её не передаёт. Подтвердившему почту сайт выдаёт
+пропуск X-Visitor-Pass: «id.срок.подпись», срок — unix-время, подпись — hex HMAC-SHA256 строки
+«id.срок» общим секретом NAV_PASS_SECRET. Страница статическая, запросы идут из браузера через
+прокси, поэтому верим только подписи: без пропуска посетитель — адрес клиента и лимит без почты.
+Сервис слушает 127.0.0.1 за прокси, и адрес клиента для него — адрес прокси: с NAV_TRUST_PROXY=1
+берём X-Real-IP, его ставит прокси, иначе последний X-Forwarded-For.
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import time
@@ -25,7 +27,7 @@ import time
 FREE_PER_DAY = int(os.environ.get("NAV_FREE_PER_DAY", "0"))
 EMAIL_PER_DAY = int(os.environ.get("NAV_EMAIL_PER_DAY", "10"))
 DAILY_CAP = int(os.environ.get("NAV_DAILY_CAP", "0"))
-SITE_TOKEN = os.environ.get("NAV_SITE_TOKEN", "")
+PASS_SECRET = os.environ.get("NAV_PASS_SECRET", "")
 TRUST_PROXY = os.environ.get("NAV_TRUST_PROXY", "") == "1"
 RESET_TEXT = "обновится в 03:00 МСК"
 
@@ -46,8 +48,8 @@ def _goods(n: int) -> str:
 
 class Limits:
     def __init__(self, free: int = FREE_PER_DAY, email: int = EMAIL_PER_DAY, cap: int = DAILY_CAP,
-                 site_token: str = SITE_TOKEN, trust_proxy: bool = TRUST_PROXY):
-        self.free, self.email, self.cap, self.site_token = free, email, cap, site_token
+                 pass_secret: str = PASS_SECRET, trust_proxy: bool = TRUST_PROXY):
+        self.free, self.email, self.cap, self.pass_secret = free, email, cap, pass_secret
         self.trust_proxy = trust_proxy
         self.day = ""
         self.used: dict[str, int] = {}
@@ -62,15 +64,25 @@ class Limits:
         if day != self.day:
             self.day, self.used, self.total = day, {}, 0
 
+    def _pass(self, value: str) -> str | None:
+        """id посетителя из пропуска, если подпись верна и срок не вышел."""
+        vid, _, rest = value.strip().partition(".")
+        expires, _, sig = rest.partition(".")
+        if not (self.pass_secret and vid and expires.isdigit() and sig) or len(vid) > 128:
+            return None
+        good = hmac.new(self.pass_secret.encode(), f"{vid}.{expires}".encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, good) or int(expires) < time.time():
+            return None
+        return vid
+
     def visitor(self, headers, host: str) -> tuple[str, bool]:
         """Ключ посетителя и есть ли у него почта."""
-        token = headers.get("x-site-token", "")
-        if self.site_token and token and hmac.compare_digest(token, self.site_token):
-            vid = headers.get("x-visitor-id", "").strip()[:128]
-            if vid:
-                return f"v:{vid}", headers.get("x-visitor-email", "").strip() == "1"
+        vid = self._pass(headers.get("x-visitor-pass", ""))
+        if vid:
+            return f"v:{vid}", True
         if self.trust_proxy:
-            host = headers.get("x-forwarded-for", "").split(",")[-1].strip() or host
+            host = (headers.get("x-real-ip", "").strip()
+                    or headers.get("x-forwarded-for", "").split(",")[-1].strip() or host)
         return f"ip:{host}", False
 
     def take(self, key: str, email: bool) -> tuple[int, int]:

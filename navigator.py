@@ -52,6 +52,40 @@ MISSING_HEADINGS = {
     "8807": "Части летательных аппаратов товарной позиции 8801, 8802 или 8806",
     "9620": "Моноопоры, двуноги, треноги и аналогичные изделия",
 }
+# Разделы ТН ВЭД: (номер, название, первая группа, последняя). Спуск от корня идёт раздел →
+# группа → позиция: 21 вариант вместо 96 групп разом. Модель видит у раздела и его группы.
+SECTIONS = [
+    ("I", "Живые животные; продукты животного происхождения", 1, 5),
+    ("II", "Продукты растительного происхождения", 6, 14),
+    ("III", "Жиры и масла животного, растительного или микробиологического происхождения; "
+            "готовые пищевые жиры; воски", 15, 15),
+    ("IV", "Готовые пищевые продукты; напитки и уксус; табак, никотинсодержащая продукция", 16, 24),
+    ("V", "Минеральные продукты", 25, 27),
+    ("VI", "Продукция химической и связанных с ней отраслей промышленности", 28, 38),
+    ("VII", "Пластмассы и изделия из них; каучук, резина и изделия из них", 39, 40),
+    ("VIII", "Шкуры, кожа, натуральный мех и изделия из них; дорожные принадлежности, сумки", 41, 43),
+    ("IX", "Древесина и изделия из нее; пробка; плетеные изделия", 44, 46),
+    ("X", "Масса из древесины; макулатура; бумага, картон и изделия из них", 47, 49),
+    ("XI", "Текстильные материалы и текстильные изделия", 50, 63),
+    ("XII", "Обувь, головные уборы, зонты, трости; перья; искусственные цветы; изделия из волоса", 64, 67),
+    ("XIII", "Изделия из камня, гипса, цемента, асбеста, слюды; керамика; стекло и изделия из него", 68, 70),
+    ("XIV", "Жемчуг, драгоценные камни, драгоценные металлы и изделия из них; бижутерия; монеты", 71, 71),
+    ("XV", "Недрагоценные металлы и изделия из них", 72, 83),
+    ("XVI", "Машины, оборудование и механизмы; электротехническое оборудование; аппаратура записи "
+            "и воспроизведения звука и изображения; их части", 84, 85),
+    ("XVII", "Средства наземного транспорта, летательные аппараты, плавучие средства", 86, 89),
+    ("XVIII", "Инструменты и аппараты оптические, фото, измерительные, медицинские; часы; "
+              "музыкальные инструменты", 90, 92),
+    ("XIX", "Оружие и боеприпасы", 93, 93),
+    ("XX", "Разные промышленные товары", 94, 96),
+    ("XXI", "Произведения искусства, предметы коллекционирования и антиквариат", 97, 97),
+]
+HINT_LIMIT = 700
+
+
+def _section(group: str) -> tuple[str, str] | None:
+    g = int(group)
+    return next(((n, t) for n, t, a, b in SECTIONS if a <= g <= b), None)
 
 
 @dataclass
@@ -60,6 +94,7 @@ class Node:
     codes: list[str] = field(default_factory=list)
     children: dict[str, "Node"] = field(default_factory=dict)
     own: list[str] = field(default_factory=list)
+    hint: str = ""  # текст для модели вместо подписи: у раздела — его группы
 
     @property
     def prefix(self) -> str:
@@ -78,8 +113,8 @@ class Node:
 
 
 class Tree:
-    """Корень → группы → позиции → ступени тарифа; только действующие 10-значные коды.
-    Путь к узлу — подписи от корня: [группа, позиция, ступень, …]."""
+    """Корень → разделы → группы → позиции → ступени тарифа; только действующие 10-значные
+    коды. Путь к узлу — подписи от корня: [раздел, группа, позиция, ступень, …]."""
 
     def __init__(self, store: TNVEDStore):
         with sqlite3.connect(DB_PATH) as conn:
@@ -95,11 +130,17 @@ class Tree:
             if h not in self.roots:
                 glabel = f"{h[:2]} {(names.get(h[:2]) or '').strip()}".strip()
                 hlabel = f"{h} {(names.get(h) or MISSING_HEADINGS.get(h, '')).strip()}".strip()
-                group = self.top.children.setdefault(glabel, Node(label=glabel))
+                sec = _section(h[:2])
+                up = self.top
+                if sec:
+                    slabel = f"Раздел {sec[0]}. {sec[1]}"
+                    up = self.top.children.setdefault(slabel, Node(label=slabel))
+                group = up.children.setdefault(glabel, Node(label=glabel))
                 self.roots[h] = group.children[hlabel] = Node(label=hlabel)
-                self.heading_path[h] = [glabel, hlabel]
+                self.heading_path[h] = ([slabel] if sec else []) + [glabel, hlabel]
             self.top.codes.append(code)
-            self.top.children[self.heading_path[h][0]].codes.append(code)
+            for i in range(1, len(self.heading_path[h])):
+                self.walk(self.heading_path[h][:i]).codes.append(code)
             node = self.roots[h]
             node.codes.append(code)
             levels = _levels(item)
@@ -108,6 +149,10 @@ class Tree:
                 node = node.children.setdefault(seg, Node(label=seg))
                 node.codes.append(code)
             node.own.append(code)
+        for sec in self.top.children.values():
+            if sec.label.startswith("Раздел "):
+                groups = "; ".join(g.label[:90] for g in sec.children.values())
+                sec.hint = f"{sec.label}. Группы: {groups}"[:HINT_LIMIT]
 
     def walk(self, path: list[str]) -> Node:
         """Узел по пути из подписей от корня; KeyError — пути в дереве нет."""
@@ -156,7 +201,8 @@ def _criteria(options: list[Node]) -> dict[str, str]:
         key = o.label[:120]
         while key in crit:
             key += "·"
-        crit[key] = OTHER_HINT if _OTHER.match(o.label) and len(o.label) < 12 else o.label[:LABEL_LIMIT]
+        crit[key] = (o.hint or (OTHER_HINT if _OTHER.match(o.label) and len(o.label) < 12
+                                else o.label[:LABEL_LIMIT]))
     return crit
 
 

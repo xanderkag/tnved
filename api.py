@@ -486,13 +486,17 @@ async def navigate(req: NavigateRequest, request: Request):
 
     key = _nav_key(description, req.path)
     visitor, quota = None, None
-    if req.path is None and limits.enabled:
+    # Лимиты — только канал site. Ответ кнопкой засчитывается новым товаром, если request_id
+    # не выдан на первом шаге этого описания (nav_limits.follow).
+    counted = public and limits.enabled and (req.path is None or not limits.follow(rid, description))
+    if counted:
         visitor, email = limits.visitor(request.headers, request.client.host if request.client else "")
         if key in _nav_cache:  # повтор уже подобранного товара лимит не тратит
             used, limit = limits.status(visitor, email)
             visitor = None
         else:
             used, limit = limits.take(visitor, email)
+        limits.bind(rid, description)
         quota = {"used": used, "limit": limit, "email": email} if limit else None
     if key in _nav_cache:
         _nav_cache.move_to_end(key)

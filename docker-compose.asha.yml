@@ -33,6 +33,13 @@ services:
       NAV_TRUST_PROXY: ${NAV_TRUST_PROXY:-0}
     secrets:
       - llm_key
+    # Страница подбора на vedbro.su ходит через общий nginx (Q-TN-VED-KONTRAKT-2): в сети proxy
+    # сервис виден под именем tnved-api, порта наружу по-прежнему нет. Лимиты страницы — в .env
+    # (NAV_FREE_PER_DAY=3, NAV_DAILY_CAP, NAV_TRUST_PROXY=1, NAV_PASS_SECRET).
+    networks:
+      default: {}
+      proxy:
+        aliases: [tnved-api]
     # Шлюз — на этом же хосте за его nginx. Имя шлюза резолвим в адрес хоста в сети
     # docker: запрос идёт тем же путём (nginx, TLS, ключ, квота), но адрес внутренний —
     # проверку netcheck проходит, описания товаров хост не покидают.
@@ -68,4 +75,8 @@ secrets:
 
 volumes:
   tnved-ollama:
+    external: true
+
+networks:
+  proxy:
     external: true

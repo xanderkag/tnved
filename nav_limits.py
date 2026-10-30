@@ -15,6 +15,12 @@ Taipit); NAV_EMAIL_PER_DAY — с почтой; NAV_DAILY_CAP — новых т�
 прокси, поэтому верим только подписи: без пропуска посетитель — адрес клиента и лимит без почты.
 Сервис слушает 127.0.0.1 за прокси, и адрес клиента для него — адрес прокси: с NAV_TRUST_PROXY=1
 берём X-Real-IP, его ставит прокси, иначе последний X-Forwarded-For.
+
+Лимиты действуют только на канал site (X-Channel ставит nginx страницы): внутренний UI и SLAI
+не ограничены. Ответ кнопкой бесплатен, только если request_id выдан на засчитанном первом шаге
+того же описания (bind/follow): иначе запрос с path и новым описанием обходил бы и лимит
+посетителя, и потолок сервиса. На один товар — не больше MAX_ANSWERS ответов: глубже дерево
+не бывает, дальше это уже перебор дерева за чужой счёт.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ DAILY_CAP = int(os.environ.get("NAV_DAILY_CAP", "0"))
 PASS_SECRET = os.environ.get("NAV_PASS_SECRET", "")
 TRUST_PROXY = os.environ.get("NAV_TRUST_PROXY", "") == "1"
 RESET_TEXT = "обновится в 03:00 МСК"
+MAX_ANSWERS = 15
 
 
 class LimitExceeded(Exception):
@@ -54,6 +61,7 @@ class Limits:
         self.day = ""
         self.used: dict[str, int] = {}
         self.total = 0
+        self.items: dict[str, list] = {}  # request_id → [хеш описания, ответов кнопками]
 
     @property
     def enabled(self) -> bool:
@@ -62,7 +70,7 @@ class Limits:
     def _roll(self) -> None:
         day = time.strftime("%Y-%m-%d", time.gmtime())
         if day != self.day:
-            self.day, self.used, self.total = day, {}, 0
+            self.day, self.used, self.total, self.items = day, {}, 0, {}
 
     def _pass(self, value: str) -> str | None:
         """id посетителя из пропуска, если подпись верна и срок не вышел."""
@@ -111,3 +119,21 @@ class Limits:
         if self.used.get(key):  # после смены суток счётчик уже пуст — возвращать нечего
             self.used[key] -= 1
             self.total -= 1
+
+    def bind(self, rid: str, description: str) -> None:
+        """Засчитанный товар: дальнейшие ответы кнопками с этим request_id бесплатны."""
+        self._roll()
+        self.items[rid] = [_digest(description), 0]
+
+    def follow(self, rid: str, description: str) -> bool:
+        """Ответ кнопкой внутри засчитанного товара? Нет — запрос считается новым товаром."""
+        self._roll()
+        item = self.items.get(rid)
+        if not item or item[0] != _digest(description) or item[1] >= MAX_ANSWERS:
+            return False
+        item[1] += 1
+        return True
+
+
+def _digest(description: str) -> str:
+    return hashlib.sha256(description.encode()).hexdigest()[:16]

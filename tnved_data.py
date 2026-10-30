@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import ett
+import excise
 import marking
 import vat
 
@@ -124,6 +125,8 @@ class TNVEDStore:
         self.vat = vat.load_from_env()
         # «Честный знак»: позиции перечня 792-р со сроком (marking.py, PAY-1); нет data/marking.json — поля нет.
         self.marking = marking.load_from_env()
+        # Акциз: виды по НК ст. 181 и ставки ст. 193 на сегодня (excise.py, PAY-1); нет data/excise.json — поля нет.
+        self.excise = excise.load_from_env()
 
     # ─── проверка совместимости индекса ───────────────────────────────────
 
@@ -332,6 +335,7 @@ class TNVEDStore:
             "duty": self._duty(item, version["tariff_as_of"]),
             "vat": self.vat.vat(code) if self.vat and len(code) == 10 else None,
             "marking": self.marking.marking(code) if self.marking and len(code) == 10 else None,
+            "excise": self.excise.excise(code) if self.excise and len(code) == 10 else None,
             **version,
         }
 

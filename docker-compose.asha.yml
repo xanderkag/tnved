@@ -22,7 +22,7 @@ services:
       # Навигатор (/api/navigate): канал решений шлюза, сейчас «jev». Только здесь, не в
       # docker-compose.yml: Jev считает у внешнего поставщика, в Taipit переменная не доходит.
       DECISIONS_MODEL: ${DECISIONS_MODEL:-}
-      NAV_THRESHOLD: ${NAV_THRESHOLD:-0.85}
+      NAV_THRESHOLD: ${NAV_THRESHOLD:-0.86}
       NAV_CANDIDATES: ${NAV_CANDIDATES:-8}
       NAV_CACHE_SIZE: ${NAV_CACHE_SIZE:-2000}
       # Лимиты открытой страницы (nav_limits.py); 0 — выключены.

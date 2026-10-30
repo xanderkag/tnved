@@ -31,8 +31,10 @@ from tnved_data import DB_PATH, TNVEDStore, is_current_leaf
 SEP = "→"
 # Замер 30.10 (ЕЭК, 88 случаев, старт с кандидатов): при 0,8 без человека 19 верно и 5 ошибок,
 # с человеком 81/88; при 0,85 — 13 верно и 1 ошибка, с человеком 85/88, вопросов 1,45 на товар.
-# Для открытой страницы уверенная ошибка дороже лишнего вопроса.
-NAV_THRESHOLD = float(os.environ.get("NAV_THRESHOLD", "0.85"))
+# Для открытой страницы уверенная ошибка дороже лишнего вопроса. Jev отдаёт уверенность с двумя
+# знаками, и ровно 0,85 в повторе ЕЭК и на 159 обычных товарах ФСА — 7 решений, 3 неверных
+# (8708 вместо 8302, 9505 вместо 9503, 9004 вместо 6506): с 0,86 на них вопрос.
+NAV_THRESHOLD = float(os.environ.get("NAV_THRESHOLD", "0.86"))
 _OTHER = re.compile(r"^\s*проч", re.I)
 # Подпись ветки «прочие» сама по себе пуста: модель видит, от чего она «прочая».
 OTHER_HINT = "прочие — не подходящие ни под один другой вариант этого уровня"
@@ -179,6 +181,13 @@ def _same(a: str, b: str) -> bool:
 Decide = Callable[[str, str, dict[str, str]], Awaitable["object"]]
 
 CANDIDATES_K = int(os.environ.get("NAV_CANDIDATES", "8"))
+# Примечание 2 к разделу XV, 1 к разделу XVI, 2 к разделу XVII: «части общего назначения»
+# (крепёж 7318, пружины 7320, арматура и фурнитура 8302) в «части» машин и транспорта не входят.
+# Поиск их часто не находит: «салазки крепления сиденья» тянут в 8708, ЕЭК решила 8302 30.
+# Есть среди кандидатов позиция «частей» — к ней в пару эти три.
+PARTS_HEADINGS = {"8409", "8431", "8448", "8466", "8473", "8503", "8529", "8538",
+                  "8607", "8708", "8714", "8716", "8803"}
+GENERAL_USE = ["7318", "7320", "8302"]
 ELSEWHERE = "другая позиция — товар не подходит ни под одну из перечисленных"
 
 
@@ -195,7 +204,10 @@ def candidate_headings(store: TNVEDStore, precedents, description: str, valid: s
             vec.append(h)
             if len(vec) >= k:
                 break
-    return list(dict.fromkeys(pre + vec))
+    out = list(dict.fromkeys(pre + vec))
+    if PARTS_HEADINGS & set(out):
+        out += [h for h in GENERAL_USE if h in valid and h not in out]
+    return out
 
 
 def _criteria(options: list[Node]) -> dict[str, str]:

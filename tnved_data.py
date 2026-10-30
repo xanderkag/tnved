@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import ett
+import vat
 
 BASE = Path(__file__).parent
 DB_PATH = BASE / "data" / "tnved.db"
@@ -118,6 +119,8 @@ class TNVEDStore:
             self.groups = [{"code": r["code"], "description": r["description"]} for r in rows]
         # Официальные ставки ЕТТ из PDF ЕЭК (ett.py, PAY-1); нет data/eec_rates.json — только TWS.BY.
         self.ett = ett.load_from_env()
+        # НДС при ввозе: 22 % и позиции перечней 10 % (vat.py, PAY-1); нет data/vat10.json — поля нет.
+        self.vat = vat.load_from_env()
 
     # ─── проверка совместимости индекса ───────────────────────────────────
 
@@ -309,7 +312,7 @@ class TNVEDStore:
         }
 
     def code_card(self, code: str) -> dict | None:
-        """Карточка кода для /api/codes/{code}: статус, путь, пошлина; None — кода нет."""
+        """Карточка кода для /api/codes/{code}: статус, путь, пошлина, НДС; None — кода нет."""
         status, item = self.code_status(code)
         if item is None:
             return None
@@ -324,6 +327,7 @@ class TNVEDStore:
             "duty_rate": item["duty_rate"],
             "data_source": item["data_source"],
             "duty": self._duty(item, version["tariff_as_of"]),
+            "vat": self.vat.vat(code) if self.vat and len(code) == 10 else None,
             **version,
         }
 

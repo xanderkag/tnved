@@ -29,13 +29,15 @@ services:
       NAV_FREE_PER_DAY: ${NAV_FREE_PER_DAY:-0}
       NAV_EMAIL_PER_DAY: ${NAV_EMAIL_PER_DAY:-10}
       NAV_DAILY_CAP: ${NAV_DAILY_CAP:-0}
+      # Чат Qwen — не больше 4 млн токенов в сутки из общей квоты (classifier.LLM_DAILY_TOKENS).
+      LLM_DAILY_TOKENS: ${LLM_DAILY_TOKENS:-4000000}
       NAV_PASS_SECRET: ${NAV_PASS_SECRET:-}
       NAV_TRUST_PROXY: ${NAV_TRUST_PROXY:-0}
     secrets:
       - llm_key
     # Страница подбора на vedbro.su ходит через общий nginx (Q-TN-VED-KONTRAKT-2): в сети proxy
     # сервис виден под именем tnved-api, порта наружу по-прежнему нет. Лимиты страницы — в .env
-    # (NAV_FREE_PER_DAY=3, NAV_DAILY_CAP, NAV_TRUST_PROXY=1, NAV_PASS_SECRET).
+    # (NAV_FREE_PER_DAY=3, NAV_DAILY_CAP=2000, NAV_TRUST_PROXY=1, NAV_PASS_SECRET).
     networks:
       default: {}
       proxy:

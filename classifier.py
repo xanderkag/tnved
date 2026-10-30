@@ -109,6 +109,11 @@ LLM_SCHEMA_MAX_TOKENS = int(os.environ.get("LLM_SCHEMA_MAX_TOKENS", "1400"))
 # Вызовов модели одновременно на весь сервис (B6): модель общая с parsdocs. Лишние ждут очереди;
 # ожидание в LLM_TIMEOUT не входит — он считается от отправки запроса.
 LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "8"))
+# Суточный потолок токенов чата (вход + выход), 0 — без потолка. На asha квота шлюза общая у чата
+# и Jev (30 млн с 30.10), а чат в разы дороже: Ванга просит держать его у себя ниже 4 млн
+# (Q-TN-VED-BYUDZHET-JEV-1-1). Сутки — UTC, как у квоты; счётчик в памяти процесса.
+LLM_DAILY_TOKENS = int(os.environ.get("LLM_DAILY_TOKENS", "0"))
+_llm_day = {"day": "", "used": 0}
 _llm_slots: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
 
 
@@ -174,6 +179,12 @@ async def _llm_call(client, cfg: LLMConfig, system: str, user: str, schema: dict
 
 
 async def _llm_call_now(client, cfg: LLMConfig, system: str, user: str, schema: dict | None, max_tokens: int):
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if _llm_day["day"] != day:
+        _llm_day.update(day=day, used=0)
+    if LLM_DAILY_TOKENS and _llm_day["used"] >= LLM_DAILY_TOKENS:
+        raise LLMUnavailable(f"Модель {cfg.model}: суточный лимит {LLM_DAILY_TOKENS} токенов исчерпан, "
+                             "обновится в 03:00 МСК")
     t0 = time.perf_counter()
     try:
         resp = await client.chat.completions.create(
@@ -197,6 +208,8 @@ async def _llm_call_now(client, cfg: LLMConfig, system: str, user: str, schema: 
 
     choice = resp.choices[0]
     usage = resp.usage
+    if usage:
+        _llm_day["used"] += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
     print(f"[llm] {cfg.model}: {time.perf_counter() - t0:.1f}s, "
           f"prompt={usage.prompt_tokens if usage else '?'} "
           f"compl={usage.completion_tokens if usage else '?'}, finish={choice.finish_reason}")

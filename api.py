@@ -41,6 +41,7 @@ from classifier import (
 import conformity
 import declarations
 import decisions
+import nav_journal
 import nav_limits
 import navigator
 import precedents
@@ -87,6 +88,7 @@ class App:
     dec: decisions.DecisionsConfig | None = None  # DECISIONS_MODEL; None — навигатор выключен
     tree: navigator.Tree | None = None
     persist: state_store.StateStore | None = None  # STATE_DB_PATH; None — только в памяти
+    journal: nav_journal.Journal | None = None  # NAV_JOURNAL_PATH; None — шаги и отзывы не пишутся
     sessions: dict[str, dict] = {}
     batch_jobs: dict[str, dict] = {}
     chats: dict[str, dict] = {}
@@ -193,6 +195,9 @@ async def lifespan(app: FastAPI):
         state.tree = navigator.Tree(state.store)
         print(f"[nav] канал решений {state.dec.model}, позиций в дереве {len(state.tree.roots)}, "
               f"порог {navigator.NAV_THRESHOLD}")
+        # NAV_JOURNAL_PATH — как STATE_DB_PATH: задан и не открывается — не стартуем.
+        state.journal = nav_journal.load_from_env()
+        print(f"[nav] журнал шагов и отзывов: {os.environ.get('NAV_JOURNAL_PATH') if state.journal else 'выключен'}")
 
     global _batch_slots
     _batch_slots = asyncio.Semaphore(BATCH_MAX_RUNNING)
@@ -480,6 +485,11 @@ async def navigate(req: NavigateRequest, request: Request):
 
     def out(res: dict, **extra) -> dict:
         res = res | extra | {"request_id": rid}
+        if state.journal is not None:
+            try:
+                state.journal.step(rid, "site" if public else "internal", req.path, res, res.get("cached", False))
+            except Exception as e:  # noqa: BLE001 — журнал не должен ронять подбор
+                print(f"[nav] {rid[:8]} журнал не записан: {e}")
         if public:
             res.pop("cost_usd", None)
         return res
@@ -531,6 +541,56 @@ async def navigate(req: NavigateRequest, request: Request):
     return out(res)
 
 
+class FeedbackRequest(BaseModel):
+    request_id: str
+    verdict: str  # wrong — код не подошёл, right — подошёл
+    code: str  # код, который показали, — сколько знаков было
+    description: Optional[str] = None  # описание товара: без него отзыв «не подошёл» не разобрать
+    expected_code: Optional[str] = None  # какой код человек считает верным, если знает
+    comment: Optional[str] = None
+
+
+_CODE = re.compile(r"[0-9]{0,10}")
+
+
+@app.post("/api/navigate/feedback")
+async def navigate_feedback(req: FeedbackRequest, request: Request):
+    """Отзыв на подобранный код: «не подошёл» или «подошёл» (nav_journal).
+
+    Принимается только на request_id, выданный навигатором; один отзыв на товар — повтор
+    заменяет прежний. Описание хранится только здесь, вместе с отзывом."""
+    if state.journal is None:
+        raise HTTPException(503, "Отзывы сейчас не принимаются")
+    if req.verdict not in nav_journal.VERDICTS:
+        raise HTTPException(422, "verdict — wrong или right")
+    code = re.sub(r"\D", "", req.code)
+    expected = re.sub(r"\D", "", req.expected_code or "")
+    if not _CODE.fullmatch(code) or not _CODE.fullmatch(expected):
+        raise HTTPException(422, "Код — до 10 цифр")
+    if not _REQUEST_ID.fullmatch(req.request_id) or not state.journal.issued(req.request_id):
+        raise HTTPException(404, "Подбор не найден — отзыв можно оставить только на код, подобранный здесь")
+    channel = "site" if request.headers.get("x-channel") == "site" else "internal"
+    if channel == "site" and state.journal.feedback_today(channel) >= nav_journal.FEEDBACK_DAILY_CAP:
+        raise HTTPException(429, "Отзывов на сегодня слишком много, попробуйте завтра")
+    description = (req.description or "").strip()[:NAV_MAX_DESCRIPTION_LEN]
+    comment = (req.comment or "").strip()[:500]
+    state.journal.feedback(req.request_id, channel, req.verdict, code, expected, comment, description)
+    print(f"[nav] {req.request_id[:8]} отзыв {req.verdict}: {code or '-'}"
+          f"{' → ' + expected if expected else ''}")
+    return {"ok": True}
+
+
+@app.get("/api/navigate/stats")
+async def navigate_stats(request: Request, days: int = 7):
+    """Сводка по живым подборам и отзывам за days суток. Только внутренний канал: в ней
+    описания из отзывов «не подошёл»."""
+    if request.headers.get("x-channel") == "site":
+        raise HTTPException(403, "Сводка только для внутреннего канала")
+    if state.journal is None:
+        raise HTTPException(503, "Журнал выключен (NAV_JOURNAL_PATH)")
+    return state.journal.stats(max(1, min(days, nav_journal.JOURNAL_DAYS)))
+
+
 @app.get("/api/classify/{session_id}")
 async def classify_get(session_id: str):
     session = state.sessions.get(session_id)
@@ -570,6 +630,7 @@ async def health():
                                                       "headings": len(state.tree.roots),
                                                       "threshold": navigator.NAV_THRESHOLD,
                                                       "cached": len(_nav_cache),
+                                                      "journal": state.journal is not None,
                                                       "limits": {"free": limits.free, "email": limits.email,
                                                                  "cap": limits.cap} if limits.enabled else None},
         "state": "sqlite" if state.persist is not None else "memory",

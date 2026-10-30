@@ -25,6 +25,8 @@ services:
       NAV_THRESHOLD: ${NAV_THRESHOLD:-0.86}
       NAV_CANDIDATES: ${NAV_CANDIDATES:-8}
       NAV_CACHE_SIZE: ${NAV_CACHE_SIZE:-2000}
+      # шаги подбора без описаний и отзывы «код не подошёл» (nav_journal.py), рядом с state.db
+      NAV_JOURNAL_PATH: ${NAV_JOURNAL_PATH-/app/state/nav.db}
       # Лимиты открытой страницы (nav_limits.py); 0 — выключены.
       NAV_FREE_PER_DAY: ${NAV_FREE_PER_DAY:-0}
       NAV_EMAIL_PER_DAY: ${NAV_EMAIL_PER_DAY:-10}

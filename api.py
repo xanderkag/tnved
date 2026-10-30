@@ -96,12 +96,19 @@ class App:
 
 state = App()
 limits = nav_limits.Limits()
-_nav_cache: OrderedDict[tuple, dict] = OrderedDict()
+_nav_cache: OrderedDict[str, dict] = OrderedDict()
+# Версия логики подбора в ключе кэша: поменялись navigator.py, conditions.py или порог — прежние
+# ответы, в том числе сохранённые в журнале, не отдаются.
+_NAV_LOGIC = hashlib.sha256(b"".join((Path(__file__).parent / f).read_bytes()
+                                     for f in ("navigator.py", "conditions.py"))).hexdigest()[:12]
 
 
-def _nav_key(description: str, path: list[str] | None) -> tuple:
-    """Регистр, пробелы и точка в конце описания ответа не меняют — в ключе их нет."""
-    return re.sub(r"\s+", " ", description.lower()).strip(" ."), None if path is None else tuple(path)
+def _nav_key(description: str, path: list[str] | None) -> str:
+    """Регистр, пробелы и точка в конце описания ответа не меняют — в ключе их нет. Ключ —
+    хэш: кэш хранится в журнале (nav_journal) без текста описаний."""
+    norm = re.sub(r"\s+", " ", description.lower()).strip(" .")
+    raw = "\x1f".join([_NAV_LOGIC, str(navigator.NAV_THRESHOLD), norm, *(["\x1e"] if path is None else path)])
+    return hashlib.sha256(raw.encode()).hexdigest()
 _batch_slots: asyncio.Semaphore | None = None  # BATCH_MAX_RUNNING, создаётся в lifespan — в цикле сервиса
 _batch_tasks: set[asyncio.Task] = set()  # ссылки на задачи пакетов, иначе сборщик мусора может их снять
 
@@ -198,6 +205,9 @@ async def lifespan(app: FastAPI):
         # NAV_JOURNAL_PATH — как STATE_DB_PATH: задан и не открывается — не стартуем.
         state.journal = nav_journal.load_from_env()
         print(f"[nav] журнал шагов и отзывов: {os.environ.get('NAV_JOURNAL_PATH') if state.journal else 'выключен'}")
+        if state.journal is not None and NAV_CACHE_SIZE:
+            _nav_cache.update(state.journal.cache_load(NAV_CACHE_SIZE))
+            print(f"[nav] из журнала в кэш: {len(_nav_cache)} ответов")
 
     global _batch_slots
     _batch_slots = asyncio.Semaphore(BATCH_MAX_RUNNING)
@@ -536,6 +546,11 @@ async def navigate(req: NavigateRequest, request: Request):
           f"вопрос {'да' if res['question'] else 'нет'}, ${res['cost_usd']}")
     if NAV_CACHE_SIZE:
         _nav_cache[key] = res
+        if state.journal is not None:
+            try:
+                state.journal.cache_put(key, res)
+            except Exception as e:  # noqa: BLE001
+                print(f"[nav] {rid[:8]} кэш в журнал не записан: {e}")
         while len(_nav_cache) > NAV_CACHE_SIZE:
             _nav_cache.popitem(last=False)
     return out(res)

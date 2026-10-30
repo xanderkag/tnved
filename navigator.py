@@ -260,8 +260,8 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
                       "choice": next(o["label"] for o in ranked if o["path"] == target[ans.choice]),
                       "confidence": round(ans.confidence, 3)})
         if ans.confidence < threshold:
-            question = {"path": None, "text": "Уточните, к какой товарной позиции ближе товар:",
-                        "options": ranked}
+            question = {"path": None, "title": "К какой товарной позиции ближе товар?",
+                        "text": "Уточните, к какой товарной позиции ближе товар:", "options": ranked}
             return _result(tree, tree.top, [], steps, question, cost)
         trail = list(target[ans.choice])
     node = tree.walk(trail)
@@ -294,7 +294,7 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
         steps.append({"path": list(trail), "options": ranked,
                       "choice": by_key[ans.choice].label, "confidence": round(ans.confidence, 3)})
         if ans.confidence < threshold:
-            question = {"path": list(trail), "text": _question_text(node, options), "options": _noted(ranked)}
+            question = {"path": list(trail), **_question_text(node, options), "options": _noted(ranked)}
             break
         node = by_key[ans.choice]
         trail.append(node.label)
@@ -329,14 +329,17 @@ def _short(name: str, limit: int = 80) -> str:
     return s[:limit].rsplit(" ", 1)[0].rstrip(",:") + "…"
 
 
-def _question_text(node: Node, options: list[Node]) -> str:
+def _question_text(node: Node, options: list[Node]) -> dict:
+    """title — короткий заголовок для страницы, text — с подсказкой и узлом в скобках."""
     if node.label == "ТН ВЭД ЕАЭС":
-        return "Уточните, к какому разделу ближе товар:"
+        return {"title": "К какому разделу ближе товар?", "text": "Уточните, к какому разделу ближе товар:"}
     by = conditions.split_by([o.label for o in options])
     if by:
-        return (f"Код зависит от {by} — выберите диапазон или допишите значение в описание "
-                f"({node.label[:160]}):")
-    return f"Уточните, что из этого подходит товару ({node.label[:160]}):"
+        return {"title": f"Код зависит от {by}",
+                "text": f"Код зависит от {by} — выберите диапазон или допишите значение в описание "
+                        f"({node.label[:160]}):"}
+    return {"title": "Что из этого подходит товару?",
+            "text": f"Уточните, что из этого подходит товару ({node.label[:160]}):"}
 
 
 def _noted(ranked: list[dict]) -> list[dict]:
@@ -344,6 +347,6 @@ def _noted(ranked: list[dict]) -> list[dict]:
     others = [o["label"] for o in ranked if not _OTHER.match(o["label"])]
     for o in ranked:
         if _OTHER.match(o["label"]) and len(o["label"]) < 25 and others:
-            o["note"] = "не подходит ни под один вариант: " + "; ".join(x[:60] for x in others[:4]) \
-                        + ("; …" if len(others) > 4 else "")
+            o["note"] = "не подходит ни под один вариант: " + "; ".join(node_name(x) for x in others[:4]) \
+                        + (f"; и ещё {len(others) - 4}" if len(others) > 4 else "")
     return ranked

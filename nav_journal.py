@@ -8,12 +8,15 @@
 
 NAV_JOURNAL_PATH — файл SQLite вне образа (на asha — ./state/nav.db). Не задан — журнала нет,
 отзыв отвечает 503. Хранится NAV_JOURNAL_DAYS суток (180), старое чистится при старте.
+Там же — кэш ответов навигатора, чтобы повтор описания не тратил лимит и после перезапуска:
+ключ — хэш описания и пути (api._nav_key), текста нет; живёт NAV_CACHE_DAYS суток (30).
 Отзыв принимается только на выданный нами request_id, один на товар (повтор заменяет прежний);
 каналу site — не больше FEEDBACK_DAILY_CAP отзывов в сутки на весь сервис.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -21,6 +24,7 @@ import time
 from pathlib import Path
 
 JOURNAL_DAYS = int(os.environ.get("NAV_JOURNAL_DAYS", "180"))
+CACHE_DAYS = int(os.environ.get("NAV_CACHE_DAYS", "30"))
 FEEDBACK_DAILY_CAP = int(os.environ.get("NAV_FEEDBACK_DAILY_CAP", "500"))
 VERDICTS = ("wrong", "right")
 
@@ -38,6 +42,8 @@ class Journal:
         self._db.execute("CREATE INDEX IF NOT EXISTS steps_ts ON steps (ts)")
         self._db.execute("CREATE TABLE IF NOT EXISTS feedback (rid TEXT PRIMARY KEY, ts REAL, channel TEXT, "
                          "verdict TEXT, code TEXT, expected TEXT, comment TEXT, description TEXT)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS cache (k TEXT PRIMARY KEY, ts REAL, res TEXT)")
+        self._db.execute("DELETE FROM cache WHERE ts < ?", (time.time() - CACHE_DAYS * 86400,))
         cutoff = time.time() - JOURNAL_DAYS * 86400
         self._db.execute("DELETE FROM steps WHERE ts < ?", (cutoff,))
         self._db.execute("DELETE FROM feedback WHERE ts < ?", (cutoff,))
@@ -48,6 +54,17 @@ class Journal:
                int(cached), 0.0 if cached else float(res.get("cost_usd") or 0))
         with self._lock:
             self._db.execute("INSERT INTO steps VALUES (?,?,?,?,?,?,?,?,?,?,?)", row)
+
+    def cache_put(self, key: str, res: dict) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?)",
+                             (key, time.time(), json.dumps(res, ensure_ascii=False)))
+
+    def cache_load(self, limit: int) -> list[tuple[str, dict]]:
+        """Последние limit ответов, от старых к новым — в таком порядке их и класть в LRU."""
+        with self._lock:
+            rows = self._db.execute("SELECT k, res FROM cache ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return [(k, json.loads(r)) for k, r in reversed(rows)]
 
     def issued(self, rid: str) -> bool:
         with self._lock:

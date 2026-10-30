@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import ett
+import marking
 import vat
 
 BASE = Path(__file__).parent
@@ -121,6 +122,8 @@ class TNVEDStore:
         self.ett = ett.load_from_env()
         # НДС при ввозе: 22 % и позиции перечней 10 % (vat.py, PAY-1); нет data/vat10.json — поля нет.
         self.vat = vat.load_from_env()
+        # «Честный знак»: позиции перечня 792-р со сроком (marking.py, PAY-1); нет data/marking.json — поля нет.
+        self.marking = marking.load_from_env()
 
     # ─── проверка совместимости индекса ───────────────────────────────────
 
@@ -328,6 +331,7 @@ class TNVEDStore:
             "data_source": item["data_source"],
             "duty": self._duty(item, version["tariff_as_of"]),
             "vat": self.vat.vat(code) if self.vat and len(code) == 10 else None,
+            "marking": self.marking.marking(code) if self.marking and len(code) == 10 else None,
             **version,
         }
 

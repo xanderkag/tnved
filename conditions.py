@@ -12,10 +12,15 @@
   слова самой величины («масса», «содержание») признаком не считаются, если в подписи
   есть точнее («массой пустого снаряженного аппарата» ≠ «взлетная масса»);
 - два разных значения с одним признаком, пересечение диапазонов, ни одна ветка не подошла
-  и «прочих» нет — правило молчит, решает модель.
+  и «прочих» нет — правило молчит, решает модель;
+- у веток с диапазоном есть ещё словесное условие, а рядом «прочие» («в порошке…, с содержанием
+  жира более 1,5 мас.%» / «прочие») — число в диапазон попало, а словесное условие правило не
+  проверяет: молчит, решает модель. Сгущёнку с 8,5% жира правило отправляло в сухое молоко
+  (замер на обычных товарах ФСА, 30.10). Число мимо всех диапазонов — «прочие» верно и так.
 
 Замер 29.10 (eval_conditions.py): самопроверка по дереву — 745 узлов с диапазонами,
-929 срабатываний, 0 не в ту ветку; на путях 197 решений ЕЭК 13 узлов с условиями,
+929 срабатываний, 0 не в ту ветку; 30.10, после запрета на ветки со словесным условием, —
+735 срабатываний, 0 не в ту ветку; на путях 197 решений ЕЭК 13 узлов с условиями,
 правило сработало на одном, верно (в длинных описаниях ЕЭК обычно несколько значений).
 """
 from __future__ import annotations
@@ -138,6 +143,21 @@ def parse_label(label: str) -> list[Cond]:
     return [] if len(dims) != len(set(dims)) else out
 
 
+def qualifier(label: str) -> str:
+    """Словесная часть подписи без фраз с числовым условием: «в порошке, гранулах…, с содержанием
+    жира более 1,5 мас.%» → «в порошке, гранулах…». Пусто — ветку целиком задаёт число."""
+    text = label.lower().replace("ё", "е")
+    spans = [m.span() for rx, _ in _PATTERNS for m in rx.finditer(text)]
+    kept = []
+    pos = 0
+    for part in re.split(r"([,;:])", text):
+        end = pos + len(part)
+        if part not in ",;:" and not any(a < end and pos < b for a, b in spans):
+            kept.append(part.strip())
+        pos = end
+    return " ".join(w for w in kept if re.search(r"[а-яa-z]{3,}", w))
+
+
 _QTY = re.compile(rf"(?<![\d.,]){_NUM}\s*({_UNIT})(?![а-яa-z0-9])")
 
 
@@ -209,6 +229,8 @@ def choose(labels: list[str], description: str) -> tuple[int, str] | None:
         hits = [i for i, c in enumerate(conds) if c is not None and next(x for x in c if x.dim == dim).holds(v)]
         others = [i for i, c in enumerate(conds) if c is None]
         if len(hits) == 1:
+            if others and qualifier(labels[hits[0]]):
+                return None
             return hits[0], _shown(dim, v)
         if not hits and len(others) == 1:
             return others[0], f"{_shown(dim, v)} — ни под один диапазон, значит «прочие»"

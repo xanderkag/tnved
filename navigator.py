@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 import conditions
+import notes
 from tnved_data import DB_PATH, TNVEDStore, is_current_leaf
 
 SEP = "→"
@@ -158,6 +159,8 @@ class Tree:
             if sec.label.startswith("Раздел "):
                 groups = "; ".join(g.label[:90] for g in sec.children.values())
                 sec.hint = f"{sec.label}. Группы: {groups}"[:HINT_LIMIT]
+        # Примечания к разделам и группам (notes.py, ALG-6): нет data/notes.json — без них.
+        self.notes = notes.load_from_env(set(self.roots))
 
     def walk(self, path: list[str]) -> Node:
         """Узел по пути из подписей от корня; KeyError — пути в дереве нет."""
@@ -249,8 +252,12 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
         heads = [h for h in candidates if h in tree.roots]
         crit = _criteria([tree.roots[h] for h in heads]) | {"другая позиция": ELSEWHERE}
         target = {k: tree.heading_path[h] for k, h in zip(crit, heads)} | {"другая позиция": []}
-        ans = await decide(description, "Товар классифицируется по ТН ВЭД ЕАЭС. "
-                           "В какую из этих товарных позиций он входит?", crit)
+        instructions = "Товар классифицируется по ТН ВЭД ЕАЭС. В какую из этих товарных позиций он входит?"
+        clauses = tree.notes.relevant(heads) if tree.notes else []
+        if clauses:  # примечания обязательны при выборе позиции (ОПИ 1)
+            instructions += ("\nПримечания к разделам и группам ТН ВЭД, обязательные при выборе "
+                             "между этими позициями:\n" + notes.text(clauses))
+        ans = await decide(description, instructions, crit)
         cost += getattr(ans, "cost_usd", 0.0)
         ranked = sorted(({"label": k if k == "другая позиция" else tree.roots[heads[i]].label,
                           "code": "" if k == "другая позиция" else heads[i], "path": target[k],
@@ -259,6 +266,8 @@ async def navigate(tree: Tree, description: str, decide: Decide, path: list[str]
         steps.append({"path": None, "options": ranked,
                       "choice": next(o["label"] for o in ranked if o["path"] == target[ans.choice]),
                       "confidence": round(ans.confidence, 3)})
+        if clauses:  # какие примечания видела модель — для обоснования на странице
+            steps[-1]["notes"] = [{"ref": c.ref, "text": c.text} for c in clauses]
         if ans.confidence < threshold:
             question = {"path": None, "title": "К какой товарной позиции ближе товар?",
                         "text": "Уточните, к какой товарной позиции ближе товар:", "options": ranked}

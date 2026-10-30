@@ -97,10 +97,11 @@ class App:
 state = App()
 limits = nav_limits.Limits()
 _nav_cache: OrderedDict[str, dict] = OrderedDict()
-# Версия логики подбора в ключе кэша: поменялись navigator.py, conditions.py или порог — прежние
-# ответы, в том числе сохранённые в журнале, не отдаются.
-_NAV_LOGIC = hashlib.sha256(b"".join((Path(__file__).parent / f).read_bytes()
-                                     for f in ("navigator.py", "conditions.py"))).hexdigest()[:12]
+# Версия логики подбора в ключе кэша: поменялись navigator.py, conditions.py, примечания или порог —
+# прежние ответы, в том числе сохранённые в журнале, не отдаются.
+_NAV_LOGIC = hashlib.sha256(b"".join(p.read_bytes() for p in (
+    Path(__file__).parent / f for f in ("navigator.py", "conditions.py", "notes.py", "data/notes.json"))
+    if p.exists())).hexdigest()[:12]
 
 
 def _nav_key(description: str, path: list[str] | None) -> str:

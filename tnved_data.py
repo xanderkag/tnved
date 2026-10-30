@@ -20,6 +20,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import ett
+
 BASE = Path(__file__).parent
 DB_PATH = BASE / "data" / "tnved.db"
 FAISS_PATH = BASE / "data" / "tnved.faiss"
@@ -114,6 +116,8 @@ class TNVEDStore:
                 "SELECT code, description FROM codes WHERE level=1 ORDER BY code"
             ).fetchall()
             self.groups = [{"code": r["code"], "description": r["description"]} for r in rows]
+        # Официальные ставки ЕТТ из PDF ЕЭК (ett.py, PAY-1); нет data/eec_rates.json — только TWS.BY.
+        self.ett = ett.load_from_env()
 
     # ─── проверка совместимости индекса ───────────────────────────────────
 
@@ -325,7 +329,10 @@ class TNVEDStore:
 
     def _duty(self, item: dict, as_of: str | None) -> dict | None:
         """Ставка с нормой: без источника и даты сайт пошлину не показывает (KONTRAKT-2).
-        as_of — «Актуальность данных» выгрузки тарифа, а не дата вступления ставки в силу."""
+        Сначала официальный текст ЕТТ (ett.py: действующая ставка, ставка для России, сноски), иначе —
+        TWS.BY; as_of там — «Актуальность данных» выгрузки тарифа, а не дата вступления ставки в силу."""
+        if self.ett and len(item["code"]) == 10 and (duty := self.ett.duty(item["code"])):
+            return duty
         if not item["duty_rate"] or item["data_source"] not in CURRENT_SOURCES:
             return None
         return {"rate": item["duty_rate"], "source": DUTY_SOURCE, "as_of": as_of}

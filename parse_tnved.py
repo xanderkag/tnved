@@ -396,7 +396,8 @@ def merge_sources(hier: list[dict], tws: dict[str, dict]) -> list[dict]:
                 "data_source": "tws",
             }
         by_code[code]["tws_chain"] = t.get("chain") or []
-    return list(by_code.values())
+    from reference_catalog import add_missing_headings
+    return add_missing_headings(list(by_code.values()))
 
 
 def save_to_db(rows: list[dict], tariff_as_of: str | None = None):

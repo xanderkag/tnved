@@ -11,7 +11,9 @@ NAV_JOURNAL_PATH — файл SQLite вне образа (на asha — ./state/
 Там же — кэш ответов навигатора, чтобы повтор описания не тратил лимит и после перезапуска:
 ключ — хэш описания и пути (api._nav_key), текста нет; живёт NAV_CACHE_DAYS суток (30).
 Отзыв принимается только на выданный нами request_id, один на товар (повтор заменяет прежний);
-каналу site — не больше FEEDBACK_DAILY_CAP отзывов в сутки на весь сервис.
+каналу site — не больше FEEDBACK_DAILY_CAP отзывов в сутки на весь сервис. Шаг помнит ключ кэша
+(хэш, не текст): отзыв «не подошёл» снимает из кэша все ответы этого подбора (forget), и повтор
+описания решается заново, а не отдаёт оспоренный код ещё 30 суток.
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ class Journal:
         self._db.execute("CREATE TABLE IF NOT EXISTS steps (ts REAL, rid TEXT, channel TEXT, first INTEGER, "
                          "depth INTEGER, code TEXT, digits INTEGER, done INTEGER, question INTEGER, "
                          "cached INTEGER, cost REAL)")
+        if "k" not in {r[1] for r in self._db.execute("PRAGMA table_info(steps)")}:
+            self._db.execute("ALTER TABLE steps ADD COLUMN k TEXT")  # ключ кэша; у шагов до 03.11 его нет
         self._db.execute("CREATE INDEX IF NOT EXISTS steps_rid ON steps (rid)")
         self._db.execute("CREATE INDEX IF NOT EXISTS steps_ts ON steps (ts)")
         self._db.execute("CREATE TABLE IF NOT EXISTS feedback (rid TEXT PRIMARY KEY, ts REAL, channel TEXT, "
@@ -48,17 +52,28 @@ class Journal:
         self._db.execute("DELETE FROM steps WHERE ts < ?", (cutoff,))
         self._db.execute("DELETE FROM feedback WHERE ts < ?", (cutoff,))
 
-    def step(self, rid: str, channel: str, path: list[str] | None, res: dict, cached: bool) -> None:
+    def step(self, rid: str, channel: str, path: list[str] | None, res: dict, cached: bool,
+             key: str = "") -> None:
         row = (time.time(), rid, channel, int(path is None), len(path or []), res.get("code") or "",
                res.get("digits", 0), int(bool(res.get("done"))), int(bool(res.get("question"))),
-               int(cached), 0.0 if cached else float(res.get("cost_usd") or 0))
+               int(cached), 0.0 if cached else float(res.get("cost_usd") or 0), key)
         with self._lock:
-            self._db.execute("INSERT INTO steps VALUES (?,?,?,?,?,?,?,?,?,?,?)", row)
+            self._db.execute("INSERT INTO steps (ts, rid, channel, first, depth, code, digits, done, question, "
+                             "cached, cost, k) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row)
 
     def cache_put(self, key: str, res: dict) -> None:
         with self._lock:
             self._db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?)",
                              (key, time.time(), json.dumps(res, ensure_ascii=False)))
+
+    def forget(self, rid: str, extra: tuple[str, ...] = ()) -> list[str]:
+        """Снять из кэша ответы всех шагов подбора rid (и ключи extra). Возвращает снятые ключи —
+        их же убрать из кэша в памяти."""
+        with self._lock:
+            keys = {k for (k,) in self._db.execute("SELECT DISTINCT k FROM steps WHERE rid = ? AND k != ''",
+                                                   (rid,))} | set(extra)
+            self._db.executemany("DELETE FROM cache WHERE k = ?", [(k,) for k in keys])
+        return sorted(keys)
 
     def cache_load(self, limit: int) -> list[tuple[str, dict]]:
         """Последние limit ответов, от старых к новым — в таком порядке их и класть в LRU."""

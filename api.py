@@ -500,7 +500,8 @@ async def navigate(req: NavigateRequest, request: Request):
         res = res | extra | {"request_id": rid}
         if state.journal is not None:
             try:
-                state.journal.step(rid, "site" if public else "internal", req.path, res, res.get("cached", False))
+                state.journal.step(rid, "site" if public else "internal", req.path, res, res.get("cached", False),
+                                   key)
             except Exception as e:  # noqa: BLE001 — журнал не должен ронять подбор
                 print(f"[nav] {rid[:8]} журнал не записан: {e}")
         if public:
@@ -576,7 +577,8 @@ async def navigate_feedback(req: FeedbackRequest, request: Request):
     """Отзыв на подобранный код: «не подошёл» или «подошёл» (nav_journal).
 
     Принимается только на request_id, выданный навигатором; один отзыв на товар — повтор
-    заменяет прежний. Описание хранится только здесь, вместе с отзывом."""
+    заменяет прежний. Описание хранится только здесь, вместе с отзывом. «Не подошёл» снимает
+    из кэша ответы этого подбора: повтор описания решается заново, оспоренный код не отдаётся."""
     if state.journal is None:
         raise HTTPException(503, "Отзывы сейчас не принимаются")
     if req.verdict not in nav_journal.VERDICTS:
@@ -593,8 +595,14 @@ async def navigate_feedback(req: FeedbackRequest, request: Request):
     description = (req.description or "").strip()[:NAV_MAX_DESCRIPTION_LEN]
     comment = (req.comment or "").strip()[:500]
     state.journal.feedback(req.request_id, channel, req.verdict, code, expected, comment, description)
+    dropped = 0
+    if req.verdict == "wrong":
+        # Шаги до 03.11 ключа не помнят — тогда первый шаг по присланному описанию.
+        extra = (_nav_key(description, None),) if description else ()
+        for k in state.journal.forget(req.request_id, extra):
+            dropped += _nav_cache.pop(k, None) is not None
     print(f"[nav] {req.request_id[:8]} отзыв {req.verdict}: {code or '-'}"
-          f"{' → ' + expected if expected else ''}")
+          f"{' → ' + expected if expected else ''}{f', из кэша снято {dropped}' if dropped else ''}")
     return {"ok": True}
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 REFERENCE = BASE / 'references/eec-heading-names-2026-11-02.json'
-CURRENT_SOURCES = ('hierarchy+tws', 'tws')
+CURRENT_SOURCES = ('hierarchy+tws', 'tws', 'eec')
 
 
 def load_reference():

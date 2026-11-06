@@ -38,7 +38,7 @@ LITE_TOP_K = int(os.environ.get("LITE_TOP_K", "120"))
 # 6- и 8-значные в индексе остаются, но это путь, а не ответ. Коды только из дерева
 # 2017 (data_source='hierarchy') сняты: модель уверенно выбирала 9401300001 вместо
 # действующих 9401310000/9401390000 — с таким кодом декларацию не примут.
-CURRENT_SOURCES = ("hierarchy+tws", "tws")
+CURRENT_SOURCES = ("hierarchy+tws", "tws", "eec")  # eec — лист из ЕТТ ЕЭК, которого ещё нет в TWS (leaf_sync.py)
 DUTY_SOURCE = ("ЕТТ ЕАЭС (Решение Совета ЕЭК от 14.09.2021 № 80, с изменениями), "
                "по выгрузке тарифа TWS.BY")
 
@@ -95,10 +95,20 @@ class TNVEDStore:
                 self.meta = json.load(f)
             # Путь — из базы: в tnved_meta.json он такой, каким был при сборке индекса,
             # а parse_tnved.py с тех пор мог его уточнить. Векторы по пути не считаются.
+            # Статус тоже из базы: leaf_sync.py снимает и добавляет коды по ЕТТ без пересборки
+            # индекса. Новые листы без вектора дописываем в конец meta — FAISS их id не вернёт,
+            # но навигатор и добор кандидатов из SQLite их видят.
             with sqlite3.connect(DB_PATH) as conn:
-                paths = dict(conn.execute("SELECT code, full_path FROM codes"))
+                conn.row_factory = sqlite3.Row
+                rows = {r["code"]: dict(r) for r in conn.execute(
+                    "SELECT code, description, full_path, duty_rate, data_source FROM codes")}
             for m in self.meta:
-                m["full_path"] = paths.get(m["code"], m.get("full_path"))
+                row = rows.get(m["code"])
+                m["full_path"] = row["full_path"] if row else m.get("full_path")
+                if row:
+                    m["data_source"] = row["data_source"]
+            indexed = {m["code"] for m in self.meta}
+            self.meta += [r for c, r in sorted(rows.items()) if c not in indexed and is_current_leaf(r)]
 
             self._check_index_passport(expected_name())
             self.embedder = get_embedder()
@@ -308,7 +318,8 @@ class TNVEDStore:
         with sqlite3.connect(DB_PATH) as conn:
             meta = dict(conn.execute("SELECT key, value FROM meta"))
             total, current = conn.execute(
-                "SELECT count(*), sum(data_source IN (?, ?)) FROM codes WHERE level = 4", CURRENT_SOURCES
+                f"SELECT count(*), sum(data_source IN ({', '.join('?' * len(CURRENT_SOURCES))})) FROM codes WHERE level = 4",
+                CURRENT_SOURCES,
             ).fetchone()
         return {
             "db_built_at": meta.get("built_at"),

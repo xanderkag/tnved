@@ -98,10 +98,17 @@ async def choose(cfg: DecisionsConfig, state: str, instructions: str, criteria: 
                                    quota=True)
     if resp.status_code != 200:
         raise DecisionsUnavailable(f"Канал решений {cfg.model}: HTTP {resp.status_code} {resp.text[:200]}")
-    data = resp.json()
-    answer = data["answers"]["q"]
-    if answer.get("choice") not in criteria:
-        raise DecisionsUnavailable(f"Канал решений {cfg.model} вернул вариант вне списка")
-    return Choice(choice=answer["choice"], confidence=float(answer.get("confidence") or 0.0),
-                  probabilities={k: float(v) for k, v in (answer.get("probabilities") or {}).items()},
-                  cost_usd=float((data.get("usage") or {}).get("cost") or 0.0))
+    # Повреждённый ответ шлюза — та же недоступность канала (502), а не KeyError: api.navigate
+    # ловит KeyError как «пути нет в дереве» и ответил бы посетителю 400 про его запрос.
+    try:
+        data = resp.json()
+        answer = data["answers"]["q"]
+        choice = answer.get("choice")
+        if choice not in criteria:
+            raise DecisionsUnavailable(f"Канал решений {cfg.model} вернул вариант вне списка")
+        return Choice(choice=choice, confidence=float(answer.get("confidence") or 0.0),
+                      probabilities={k: float(v) for k, v in (answer.get("probabilities") or {}).items()},
+                      cost_usd=float((data.get("usage") or {}).get("cost") or 0.0))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise DecisionsUnavailable(f"Канал решений {cfg.model} вернул повреждённый ответ: "
+                                   f"{type(exc).__name__}") from None

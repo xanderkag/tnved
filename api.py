@@ -536,11 +536,12 @@ async def navigate(req: NavigateRequest, request: Request):
                                                  description, set(state.tree.roots))
         res = await navigator.navigate(state.tree, description, decide, path=req.path,
                                        candidates=candidates)
-    except KeyError as e:
-        raise HTTPException(400, f"Пути нет в дереве: {e}") from None
-    except BaseException:
+    except BaseException as e:
+        # Отказ любого рода — товар посетителю не в счёт, в том числе неверный путь (400).
         if visitor is not None:
             limits.refund(visitor)
+        if isinstance(e, KeyError):
+            raise HTTPException(400, f"Пути нет в дереве: {e}") from None
         raise
     res["quota"] = quota  # сколько товаров подобрано сегодня из скольких; None — без лимита
     res["codes"] = [{"code": c, "name": store.code_to_meta[c]["description"]} for c in res["codes"]]

@@ -19,6 +19,7 @@ content_sha256 — хэш карточки: меняется только при
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import io
@@ -28,7 +29,9 @@ import re
 import sys
 from datetime import datetime, timezone
 
-os.environ.setdefault("LITE_MODE", "1")
+# Всегда LITE, даже если в контейнере LITE_MODE=0: карточке не нужен FAISS, а второй индекс
+# в памяти рядом с сервисом на проде лишний. Ставим до импорта tnved_data.
+os.environ["LITE_MODE"] = "1"
 
 CODE_RE = re.compile(r"\d{10}")
 
@@ -82,7 +85,9 @@ def main(argv=None) -> int:
         p.error("нет кодов")
     import conformity
     from tnved_data import TNVEDStore
-    out = build(codes, TNVEDStore(), conformity.load_from_env())
+    with contextlib.redirect_stdout(sys.stderr):  # служебная печать загрузки не должна портить JSON
+        store, conf = TNVEDStore(), conformity.load_from_env()
+    out = build(codes, store, conf)
     json.dump(out, sys.stdout, ensure_ascii=False, indent=1)
     sys.stdout.write("\n")
     bad = [i["code"] for i in out["codes"] if i["status"] != "current"]
